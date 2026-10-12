@@ -59,6 +59,9 @@ FONT_ORDER = ["Sans", "Serif", "Mono"]
 TEXT_MIN_IN = 0.08            # smallest text-box height (inches)
 TEXT_MAX_IN = 0.60            # largest text-box height (inches)
 
+IMAGE_SCALE_MIN = 0.25        # image-scale slider range (25%..500%)
+IMAGE_SCALE_MAX = 5.0
+
 _fonts = {}
 
 
@@ -266,7 +269,8 @@ class App:
     OPT_PANEL = pygame.Rect(36, 472, 448, 300)
     PREV_PANEL = pygame.Rect(512, 100, 572, 366)
     LIST_AREA = pygame.Rect(52, 156, 416, 232)
-    TITLE_FIELD = pygame.Rect(56, 532, 408, 36)
+    TITLE_FIELD = pygame.Rect(56, 506, 408, 32)
+    SCALE_SLIDER = pygame.Rect(56, 748, 380, 14)
     PREVIEW_FRAME = pygame.Rect(530, 148, 536, 300)
     TEXT_PANEL = pygame.Rect(512, 476, 572, 112)
     STATUS_PANEL = pygame.Rect(512, 704, 572, 68)
@@ -283,6 +287,8 @@ class App:
         self.views = 5
         self.orientation = "landscape"
         self.dpi = 150
+        self.image_scale = 1.0
+        self.flatten_psd = True
         self.title_text = ""
         self.title_focus = False
 
@@ -290,10 +296,14 @@ class App:
         self.selected_text = None
         self.text_focus = False
         self.text_drag = None
+        self.pan = (0.0, 0.0)          # preview pan offset from the frame centre
+        self.panning = None
         self.font_key = FONT_ORDER[0]  # face new boxes use until one is selected
 
-        self.sheet = None
+        self.sheet = None              # output sheet (at the canvas scale)
         self.info = None
+        self.base_sheet = None         # 100% sheet used for the preview
+        self.base_info = None
         self.preview = None
         self.status = "Add a source file to begin."
         self.status_ok = True
@@ -319,26 +329,34 @@ class App:
                    base=VIOLET, tfont=font(19, True)),
         ]
         self.buttons += [
-            Button((60 + i * 56, 602, 48, 34), str(v),
+            Button((60 + i * 56, 568, 48, 30), str(v),
                    (lambda v=v: self.set_views(v)),
                    selected=(lambda v=v: self.views == v), tfont=font(16, True))
             for i, v in enumerate((3, 4, 5, 8))
         ]
         self.buttons += [
-            Button((60, 666, 118, 34), "Landscape",
+            Button((60, 628, 118, 30), "Landscape",
                    lambda: self.set_orientation("landscape"),
                    selected=lambda: self.orientation == "landscape",
                    tfont=font(15, True)),
-            Button((186, 666, 118, 34), "Portrait",
+            Button((186, 628, 118, 30), "Portrait",
                    lambda: self.set_orientation("portrait"),
                    selected=lambda: self.orientation == "portrait",
                    tfont=font(15, True)),
         ]
         self.buttons += [
-            Button((60, 730, 92, 32), "%d dpi" % d, (lambda d=d: self.set_dpi(d)),
+            Button((60, 688, 92, 30), "%d dpi" % d, (lambda d=d: self.set_dpi(d)),
                    selected=(lambda d=d: self.dpi == d), tfont=font(15, True))
             for d in (150, 300)
         ]
+        self.scale_slider = Slider(self.SCALE_SLIDER,
+                                   self._image_scale, self._set_image_scale,
+                                   IMAGE_SCALE_MIN, IMAGE_SCALE_MAX)
+        self.buttons.append(
+            Button((self.OPT_PANEL.x + 300, self.OPT_PANEL.y + 8, 148, 26),
+                   "Flatten PSD", self.toggle_flatten, base=VIOLET,
+                   tfont=font(13, True),
+                   selected=lambda: self.flatten_psd))
         P = self.TEXT_PANEL
         self.buttons += [
             Button((P.x + 16, P.y + 34, 108, 32), "Add Text", self.add_text,
@@ -434,6 +452,44 @@ class App:
     def set_dpi(self, d):
         self.dpi = d
 
+    def _image_scale(self):
+        return self.image_scale
+
+    def _set_image_scale(self, value):
+        value = min(IMAGE_SCALE_MAX, max(IMAGE_SCALE_MIN, value))
+        if abs(value - self.image_scale) < 1e-6:
+            return
+        self.image_scale = value
+        self._make_preview()          # zoom the preview so the slider is visible
+        w, h = ts.output_size(self.orientation, self.dpi, self.image_scale)
+        self.status, self.status_ok = (
+            "Canvas scale %d%% -> %dx%d px (%.0fx%.0f in)."
+            % (int(round(value * 100)), w, h,
+               w / float(self.dpi), h / float(self.dpi)), True)
+
+    def toggle_flatten(self):
+        self.flatten_psd = not self.flatten_psd
+        self._refresh_preview()
+
+    def _refresh_preview(self):
+        """Rebuild sheet + preview without touching the status line or disk.
+
+        Used by the Flatten PSD toggle. Only the 100% sheet (which drives the
+        preview) is rebuilt here - the canvas-scaled output is rebuilt on save /
+        send, so dragging options never builds a huge surface.
+        """
+        if not self.inputs or self.busy:
+            return
+        try:
+            sheet, info = ts.build_sheet(
+                self.inputs, self.views, self.orientation, self.dpi,
+                self.title_text, elevation=8.0, image_scale=1.0,
+                psd_layers=not self.flatten_psd)
+        except Exception:                                  # noqa: BLE001
+            return
+        self.base_sheet, self.base_info = sheet, info
+        self._make_preview()
+
     # ------------------------------------------------------------------ #
     # text boxes
     # ------------------------------------------------------------------ #
@@ -521,22 +577,45 @@ class App:
         it["bold"] = not it.get("bold")
 
     def preview_scale(self):
-        if self.preview is None or self.sheet is None:
+        if self.preview is None or self.base_sheet is None:
             return None
-        return self.preview.get_width() / float(self.sheet.get_width())
+        return self.preview.get_width() / float(self.base_sheet.get_width())
+
+    def _clamp_pan(self):
+        """Keep the stored pan inside the frame (so it cannot run away)."""
+        if self.preview is None:
+            self.pan = (0.0, 0.0)
+            return
+        f = self.PREVIEW_FRAME
+        pw, ph = self.preview.get_size()
+        if pw <= f.width:
+            px = 0.0
+        else:
+            px = min((f.x + pw / 2.0) - f.centerx,
+                     max((f.right - pw / 2.0) - f.centerx, self.pan[0]))
+        if ph <= f.height:
+            py = 0.0
+        else:
+            py = min((f.y + ph / 2.0) - f.centery,
+                     max((f.bottom - ph / 2.0) - f.centery, self.pan[1]))
+        self.pan = (px, py)
 
     def preview_origin(self):
+        """Topleft of the preview on screen (panned, kept inside the frame)."""
         if self.preview is None:
             return None
-        return self.preview.get_rect(center=self.PREVIEW_FRAME.center).topleft
+        f = self.PREVIEW_FRAME
+        pw, ph = self.preview.get_size()
+        return (int(f.centerx + self.pan[0] - pw / 2.0),
+                int(f.centery + self.pan[1] - ph / 2.0))
 
     def text_screen_rect(self, i):
         """On-screen rect of text box ``i`` inside the preview (or None)."""
         sc = self.preview_scale()
-        if sc is None or self.info is None or not (0 <= i < len(self.texts)):
+        if sc is None or self.base_info is None or not (0 <= i < len(self.texts)):
             return None
         ox, oy = self.preview_origin()
-        ppi = self.info["dpi"] * sc
+        ppi = self.base_info.get("px_per_inch", self.base_info["dpi"]) * sc
         it = self.texts[i]
         f = ts.text_font_for(it.get("size_in", ts.DEFAULT_TEXT_SIZE_IN), ppi,
                              it.get("bold"), it.get("font"))
@@ -557,7 +636,8 @@ class App:
         if self.sheet is None:
             return None
         s = self.sheet.copy()
-        ts.draw_texts(s, self.texts, self.info["dpi"])
+        ts.draw_texts(s, self.texts,
+                      self.info.get("px_per_inch", self.info["dpi"]))
         return s
 
     def _drag_text(self, pos):
@@ -607,6 +687,9 @@ class App:
         else:
             self.selected_text = None
             self.text_focus = False
+            if self.PREVIEW_FRAME.collidepoint(pos):
+                # grab empty preview space to pan the zoomed sheet into frame
+                self.panning = {"start": pos, "pan": self.pan}
 
     # ------------------------------------------------------------------ #
     # actions
@@ -619,18 +702,28 @@ class App:
         self.status, self.status_ok = "Rendering views...", True
         self._paint()
         try:
-            sheet, info = ts.build_sheet(
+            base_sheet, base_info = ts.build_sheet(
                 self.inputs, self.views, self.orientation, self.dpi,
-                self.title_text, elevation=8.0)
-            preview_sheet = sheet.copy()
-            ts.draw_texts(preview_sheet, self.texts, info["dpi"])
-            pygame.image.save(preview_sheet, str(OUT))
+                self.title_text, elevation=8.0, image_scale=1.0,
+                psd_layers=not self.flatten_psd)
+            if abs(self.image_scale - 1.0) < 1e-6:
+                sheet, info = base_sheet, base_info
+            else:
+                sheet, info = ts.build_sheet(
+                    self.inputs, self.views, self.orientation, self.dpi,
+                    self.title_text, elevation=8.0, image_scale=self.image_scale,
+                    psd_layers=not self.flatten_psd)
+            out_sheet = sheet.copy()
+            ts.draw_texts(out_sheet, self.texts,
+                          info.get("px_per_inch", info["dpi"]))
+            pygame.image.save(out_sheet, str(OUT))
         except Exception as exc:                          # noqa: BLE001
             self.busy = False
             self.status, self.status_ok = "Build failed: %s" % exc, False
             return False
         self.busy = False
         self.sheet, self.info = sheet, info
+        self.base_sheet, self.base_info = base_sheet, base_info
         self._make_preview()
         self.status = ("Built %dx%d px @ %d ppi - %d view(s) -> %s"
                        % (info["size"][0], info["size"][1], info["dpi"],
@@ -649,7 +742,9 @@ class App:
         self.status, self.status_ok = msg, ok
 
     def save_as(self):
-        if self.sheet is None and not self.build():
+        if self.inputs and not self.build():
+            return
+        if self.sheet is None:
             return
         dlg = _tk_dialog()
         if dlg is None:
@@ -672,14 +767,19 @@ class App:
             self.status, self.status_ok = "Saved %s" % path, True
 
     def _make_preview(self):
-        if self.sheet is None:
+        # Preview is built from the 100% sheet and zoomed by the canvas scale,
+        # so the scale slider visibly grows / shrinks the sheet (100% = fits
+        # the frame; above that it is clipped and can be panned).
+        self.pan = (0.0, 0.0)                 # recentre on any geometry change
+        self.panning = None
+        if self.base_sheet is None:
             self.preview = None
             return
         f = self.PREVIEW_FRAME
-        sw, sh = self.sheet.get_size()
-        sc = min(f.width / sw, f.height / sh)
+        sw, sh = self.base_sheet.get_size()
+        sc = min(f.width / sw, f.height / sh) * self.image_scale
         self.preview = pygame.transform.smoothscale(
-            self.sheet, (max(1, int(sw * sc)), max(1, int(sh * sc))))
+            self.base_sheet, (max(1, int(sw * sc)), max(1, int(sh * sc))))
 
     def list_row_rect(self, i):
         return pygame.Rect(self.LIST_AREA.x + 6, self.LIST_AREA.y + 6 + i * 30,
@@ -710,12 +810,20 @@ class App:
         if event.type in (pygame.MOUSEBUTTONDOWN, pygame.MOUSEBUTTONUP,
                           pygame.MOUSEMOTION):
             self.size_slider.handle(event)
+            self.scale_slider.handle(event)
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
             self._on_click(event.pos)
         elif event.type == pygame.MOUSEMOTION and self.text_drag:
             self._drag_text(event.pos)
+        elif event.type == pygame.MOUSEMOTION and self.panning:
+            dx = event.pos[0] - self.panning["start"][0]
+            dy = event.pos[1] - self.panning["start"][1]
+            self.pan = (self.panning["pan"][0] + dx,
+                        self.panning["pan"][1] + dy)
+            self._clamp_pan()
         elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
             self.text_drag = None
+            self.panning = None
         for b in self.buttons:
             b.handle(event)
         return True
@@ -753,7 +861,7 @@ class App:
         text_shadow(self.screen, "Source files", font(19, True), INK,
                     (p.x + 18, p.y + 14), sh=(255, 255, 255))
         self.screen.blit(font(12).render(
-            "images + Maya .ma/.mb/.obj   (click a row to select)", True,
+            "images + PSD + Maya .ma/.mb/.obj   (click a row to select)", True,
             INK_SOFT), (p.x + 20, p.y + 40))
 
         area = self.LIST_AREA
@@ -798,13 +906,19 @@ class App:
                     (p.x + 18, p.y + 12), sh=(255, 255, 255))
         lbl = font(13, True)
         self.screen.blit(lbl.render("Sheet title", True, INK_SOFT),
-                         (60, 510))
+                         (60, 486))
         self.screen.blit(lbl.render("Rotation views", True, INK_SOFT),
-                         (60, 586))
+                         (60, 552))
         self.screen.blit(lbl.render("Orientation", True, INK_SOFT),
-                         (60, 650))
+                         (60, 612))
         self.screen.blit(lbl.render("Resolution", True, INK_SOFT),
-                         (60, 714))
+                         (60, 672))
+        self.screen.blit(lbl.render("Canvas scale", True, INK_SOFT),
+                         (60, 732))
+        self.scale_slider.draw(self.screen)
+        self.screen.blit(font(14, True).render(
+            "%d%%" % int(round(self._image_scale() * 100)), True, INK),
+            (442, 740))
 
         fr = self.TITLE_FIELD
         self.screen.blit(rounded(fr.size, 12, (255, 255, 255, 155)), fr)
@@ -824,6 +938,9 @@ class App:
         self.screen.blit(glass_panel(p.size), p.topleft)
         text_shadow(self.screen, "Preview", font(19, True), INK,
                     (p.x + 18, p.y + 14), sh=(255, 255, 255))
+        self.screen.blit(font(12).render(
+            "drag to pan the zoomed sheet", True, INK_SOFT),
+            (p.x + 110, p.y + 20))
         fr = self.PREVIEW_FRAME
         self.screen.blit(rounded(fr.size, 10, (255, 255, 255, 185)),
                          fr.topleft)
@@ -832,8 +949,12 @@ class App:
         if self.preview:
             disp = self.preview.copy()
             sc = self.preview_scale()
-            if self.texts and sc and self.info:
-                ts.draw_texts(disp, self.texts, self.info["dpi"] * sc)
+            if self.texts and sc and self.base_info:
+                ts.draw_texts(disp, self.texts,
+                              self.base_info.get("px_per_inch",
+                                                 self.base_info["dpi"]) * sc)
+            clip = self.screen.get_clip()
+            self.screen.set_clip(fr)
             self.screen.blit(disp, disp.get_rect(center=fr.center))
             if self.selected_text is not None:
                 r = self.text_screen_rect(self.selected_text)
@@ -845,6 +966,11 @@ class App:
                         pygame.draw.line(self.screen, AQUA_DEEP,
                                          (r.right + 3, r.top - 2),
                                          (r.right + 3, r.bottom + 2), 2)
+            zoom = font(14, True).render(
+                "%d%%" % int(round(self.image_scale * 100)), True, AQUA_DEEP)
+            self.screen.blit(zoom, (fr.right - zoom.get_width() - 10,
+                                    fr.y + 8))
+            self.screen.set_clip(clip)
         else:
             msg = font(15).render("Build to see your turnaround sheet", True,
                                   INK_SOFT)
