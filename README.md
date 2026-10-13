@@ -8,4 +8,8 @@ Recording: https://drive.google.com/file/d/1QxCBU2fqnB5vpCianzwfmMu_ZGBTjxHk/vie
 MIDTERM PROPOSAL: Photoshop Color Script Palette Organizer  
 Tool: Opens an interface that allows user to insert pre-existing images (no limit on image count) and have it pull the dominant colors to generate a layout of swatches that the user can customize the orientation and shape of and overall look of the layout as well as create gradients from a collection of images to use in programs like photoshop. 
 What Chore Does The Tool End: Creating a color script layout by hand and using the eyedropper tool to create swatches 
+1 week goals: Design sleek UI that has simple settings and can generate decent layouts
+2 week goals: Refine look/design of UI and anything that wasn't working properly and add more complex settings
+3 week goals: Have the program function seamlessly and possibly have an in-photoshop option editor 
+
 UI: https://drive.google.com/file/d/1-1poFaTcrw8bYwfcpXH836sC8DdxOisZ/view?usp=sharing
