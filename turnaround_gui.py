@@ -14,6 +14,9 @@ Cross-platform: Windows, macOS and Linux all run the GUI and build sheets (fonts
 and the Maya lookup adapt per OS). Sending to Photoshop needs Windows or macOS.
 """
 
+import math
+import threading
+import time
 from pathlib import Path
 
 import pygame
@@ -36,6 +39,9 @@ AQUA = (0, 158, 214)
 AQUA_DEEP = (0, 120, 178)
 GREEN = (46, 190, 150)
 VIOLET = (120, 90, 210)
+
+LOADING_DELAY = 5.0           # build seconds before the loading spinner shows
+SPIN_SPEED = 4.0              # spinner phase advance, in dots per second
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".tga", ".gif", ".webp"}
 MODEL_EXTS = {".ma", ".mb", ".obj"}
@@ -61,6 +67,9 @@ TEXT_MAX_IN = 0.60            # largest text-box height (inches)
 
 IMAGE_SCALE_MIN = 0.25        # image-scale slider range (25%..500%)
 IMAGE_SCALE_MAX = 5.0
+
+LOADING_DELAY = 5.0           # show the spinner only if a build runs this long
+SPIN_SPEED = 4.0              # spinner phase advance, in dots per second
 
 _fonts = {}
 
@@ -173,9 +182,24 @@ def text_shadow(surf, txt, f, color, pos, center=False, sh=(10, 30, 50),
     return rect
 
 
-# --------------------------------------------------------------------------- #
-# widgets
-# --------------------------------------------------------------------------- #
+def draw_loading_spinner(surf, center, phase, radius=30, dots=8,
+                         color=(70, 120, 150), accent=(255, 255, 255)):
+    """A ring of dots that light up in a chasing sequence (Windows-7 style).
+
+    ``phase`` advances in dot units; larger values rotate the highlight
+    clockwise around the ring.
+    """
+    for i in range(dots):
+        ang = -math.pi / 2 + i * (2.0 * math.pi / dots)
+        x = center[0] + math.cos(ang) * radius
+        y = center[1] + math.sin(ang) * radius
+        k = (i - phase) % dots                    # 0 = leading dot
+        lit = (1.0 - k / dots) ** 1.6             # trailing fade
+        col = lerp(color, accent, lit)
+        r = int(round(3.0 + 4.0 * lit))
+        pygame.draw.circle(surf, col, (int(round(x)), int(round(y))), r)
+
+
 class Button:
     def __init__(self, rect, label, callback, base=AQUA, tfont=None,
                  selected=None, radius=13):
@@ -261,6 +285,144 @@ class Slider:
         pygame.draw.circle(surf, (0, 120, 178, 255), (kx, r.centery), 9, 2)
 
 
+class Scrollbar:
+    """A thin scrollbar that pans the preview (maps a pan offset to a thumb)."""
+
+    THUMB_MIN = 26
+    HIT_PAD = 8                       # extra grab margin around the bar
+
+    def __init__(self, rect, vertical, state_fn, set_fn):
+        self.rect = pygame.Rect(rect)
+        self.vertical = vertical
+        self.state_fn = state_fn      # -> (pan, content, viewport) or None
+        self.set_fn = set_fn          # receives the new pan offset
+        self.dragging = False
+        self.grab = 0.0
+        self.hover = False
+
+    def _hit(self, pos):
+        pad = self.HIT_PAD
+        return self.rect.inflate(pad * 2, pad * 2).collidepoint(pos)
+
+    def _metrics(self):
+        st = self.state_fn()
+        if not st:
+            return None
+        pan, content, view = st
+        if view <= 0 or content <= view:
+            return None
+        over = content - view
+        length = self.rect.height if self.vertical else self.rect.width
+        thumb = max(self.THUMB_MIN, length * (view / float(content)))
+        travel = length - thumb
+        t = min(1.0, max(0.0, (over / 2.0 - pan) / over))
+        return over, thumb, travel, t * travel
+
+    def _thumb_rect(self):
+        r = self.rect
+        m = self._metrics()
+        if m is None:
+            return r.copy(), False
+        _over, thumb, _travel, pos = m
+        if self.vertical:
+            return pygame.Rect(r.x, int(round(r.y + pos)), r.width,
+                               int(round(thumb))), True
+        return pygame.Rect(int(round(r.x + pos)), r.y, int(round(thumb)),
+                           r.height), True
+
+    def _set_from_pos(self, pos):
+        m = self._metrics()
+        if m is None:
+            return
+        over, _thumb, travel, _pos = m
+        p = (pos[1] - self.rect.y) if self.vertical else (pos[0] - self.rect.x)
+        p = min(travel, max(0.0, p - self.grab))
+        t = 0.0 if travel <= 0 else p / travel
+        self.set_fn(over / 2.0 - t * over)
+
+    def handle(self, event):
+        if event.type == pygame.MOUSEMOTION:
+            self.hover = self._hit(event.pos)
+            if self.dragging:
+                self._set_from_pos(event.pos)
+        elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            if self._hit(event.pos):
+                if self._metrics() is None:
+                    return
+                thumb, _active = self._thumb_rect()
+                if thumb.collidepoint(event.pos):
+                    self.grab = ((event.pos[1] - thumb.y) if self.vertical
+                                 else (event.pos[0] - thumb.x))
+                else:
+                    self.grab = (thumb.height if self.vertical
+                                 else thumb.width) / 2.0
+                self.dragging = True
+                self._set_from_pos(event.pos)
+        elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+            self.dragging = False
+
+    def draw(self, surf):
+        r = self.rect
+        pygame.draw.rect(surf, (255, 255, 255, 130), r, border_radius=6)
+        thumb, active = self._thumb_rect()
+        if active:
+            col = (0, 150, 205) if (self.hover or self.dragging) \
+                else (0, 176, 224)
+        else:
+            col = (204, 211, 217)         # faint = nothing to scroll
+        pygame.draw.rect(surf, col, thumb, border_radius=6)
+
+
+class Checkbox:
+    """A glassy check box with a label.
+
+    ``checked_fn()`` -> bool reports the state, ``toggle_fn()`` flips it.
+    """
+
+    BOX = 22
+
+    def __init__(self, rect, label, checked_fn, toggle_fn, tfont=None):
+        self.rect = pygame.Rect(rect)
+        self.label = label
+        self.checked_fn = checked_fn
+        self.toggle_fn = toggle_fn
+        self.tfont = tfont or font(13, True)
+        self.hover = False
+        self.pressed = False
+
+    def handle(self, event):
+        if event.type == pygame.MOUSEMOTION:
+            self.hover = self.rect.collidepoint(event.pos)
+        elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            self.pressed = self.rect.collidepoint(event.pos)
+        elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+            if self.pressed and self.rect.collidepoint(event.pos):
+                self.toggle_fn()
+            self.pressed = False
+
+    def draw(self, surf):
+        w, h = self.rect.size
+        s = pygame.Surface((w, h), pygame.SRCALPHA)
+        tint = (255, 255, 255, 150 if self.hover else 105)
+        pygame.draw.rect(s, tint, (0, 0, w, h), border_radius=13)
+        pygame.draw.rect(s, (255, 255, 255, 190), (0, 0, w, h), width=2,
+                         border_radius=13)
+        box = pygame.Rect(12, (h - self.BOX) // 2, self.BOX, self.BOX)
+        checked = bool(self.checked_fn())
+        pygame.draw.rect(s, (255, 255, 255, 235), box, border_radius=6)
+        pygame.draw.rect(s, (150, 170, 190) if not checked else AQUA_DEEP,
+                         box, width=2, border_radius=6)
+        if checked:
+            pygame.draw.rect(s, AQUA, box.inflate(-6, -6), border_radius=4)
+            cx, cy = box.center
+            pygame.draw.lines(s, (255, 255, 255), False,
+                              [(cx - 6, cy), (cx - 2, cy + 5),
+                               (cx + 7, cy - 5)], 3)
+        lab = self.tfont.render(self.label, True, INK)
+        s.blit(lab, (box.right + 10, (h - lab.get_height()) // 2))
+        surf.blit(s, self.rect.topleft)
+
+
 # --------------------------------------------------------------------------- #
 # app
 # --------------------------------------------------------------------------- #
@@ -272,6 +434,8 @@ class App:
     TITLE_FIELD = pygame.Rect(56, 506, 408, 32)
     SCALE_SLIDER = pygame.Rect(56, 748, 380, 14)
     PREVIEW_FRAME = pygame.Rect(530, 148, 536, 300)
+    HSCROLL = pygame.Rect(530, 452, 536, 12)
+    VSCROLL = pygame.Rect(1070, 148, 12, 300)
     TEXT_PANEL = pygame.Rect(512, 476, 572, 112)
     STATUS_PANEL = pygame.Rect(512, 704, 572, 68)
 
@@ -288,7 +452,10 @@ class App:
         self.orientation = "landscape"
         self.dpi = 150
         self.image_scale = 1.0
-        self.flatten_psd = True
+        self.spread_psd = True         # checked = spread a PSD's layers into views
+        self.crop_mode = False         # drag-a-box crop tool over the preview
+        self.crop_rect = None          # (x0,y0,x1,y1) in 0..1 of the sheet
+        self.crop_drag = None          # [start_pos, cur_pos] while dragging
         self.title_text = ""
         self.title_focus = False
 
@@ -307,10 +474,19 @@ class App:
         self.preview = None
         self.status = "Add a source file to begin."
         self.status_ok = True
-        self.busy = False
+        self.busy = False              # a build / send is in flight
+        self.build_thread = None
+        self.build_result = None
+        self.build_error = None
+        self.build_start = 0.0
+        self.pending_action = None     # "send" / "save" queued behind a build
+        self.busy_frame = None         # frozen UI shown while busy
+        self.busy_label = None         # pre-rendered "Loading..." text
         self.running = True
 
         self._build_widgets()
+        self.hscroll = Scrollbar(self.HSCROLL, False, self._h_state, self._pan_x)
+        self.vscroll = Scrollbar(self.VSCROLL, True, self._v_state, self._pan_y)
 
     # ------------------------------------------------------------------ #
     def _build_widgets(self):
@@ -321,9 +497,9 @@ class App:
                    base=(110, 140, 170), tfont=font(15, True)),
             Button((350, 402, 130, 34), "Clear all", self.clear_all,
                    base=(150, 155, 165), tfont=font(15, True)),
-            Button((512, 596, 210, 44), "Save PNG As...", self.save_as,
+            Button((512, 596, 171, 44), "Save PNG As...", self.save_as,
                    base=GREEN, tfont=font(16, True)),
-            Button((734, 596, 188, 44), "Build preview", self.build,
+            Button((691, 596, 171, 44), "Build preview", self.build,
                    base=AQUA, tfont=font(16, True)),
             Button((512, 648, 572, 46), "Send to Photoshop", self.send,
                    base=VIOLET, tfont=font(19, True)),
@@ -352,11 +528,17 @@ class App:
         self.scale_slider = Slider(self.SCALE_SLIDER,
                                    self._image_scale, self._set_image_scale,
                                    IMAGE_SCALE_MIN, IMAGE_SCALE_MAX)
-        self.buttons.append(
-            Button((self.OPT_PANEL.x + 300, self.OPT_PANEL.y + 8, 148, 26),
-                   "Flatten PSD", self.toggle_flatten, base=VIOLET,
-                   tfont=font(13, True),
-                   selected=lambda: self.flatten_psd))
+        self.flatten_check = Checkbox(
+            (870, 596, 214, 44), "Spread PSD Layers",
+            checked_fn=lambda: self.spread_psd, toggle_fn=self.toggle_spread,
+            tfont=font(13, True))
+        self.buttons += [
+            Button((826, 112, 110, 30), "Crop", self.toggle_crop, base=AQUA,
+                   tfont=font(14, True),
+                   selected=lambda: self.crop_mode),
+            Button((944, 112, 120, 30), "Clear crop", self.clear_crop,
+                   base=(150, 155, 165), tfont=font(14, True)),
+        ]
         P = self.TEXT_PANEL
         self.buttons += [
             Button((P.x + 16, P.y + 34, 108, 32), "Add Text", self.add_text,
@@ -467,14 +649,14 @@ class App:
             % (int(round(value * 100)), w, h,
                w / float(self.dpi), h / float(self.dpi)), True)
 
-    def toggle_flatten(self):
-        self.flatten_psd = not self.flatten_psd
+    def toggle_spread(self):
+        self.spread_psd = not self.spread_psd
         self._refresh_preview()
 
     def _refresh_preview(self):
         """Rebuild sheet + preview without touching the status line or disk.
 
-        Used by the Flatten PSD toggle. Only the 100% sheet (which drives the
+        Used by the Spread PSD Layers toggle. Only the 100% sheet (which drives the
         preview) is rebuilt here - the canvas-scaled output is rebuilt on save /
         send, so dragging options never builds a huge surface.
         """
@@ -484,18 +666,138 @@ class App:
             sheet, info = ts.build_sheet(
                 self.inputs, self.views, self.orientation, self.dpi,
                 self.title_text, elevation=8.0, image_scale=1.0,
-                psd_layers=not self.flatten_psd)
+                psd_layers=self.spread_psd, trim_psd=False,
+                draw_captions=False)
         except Exception:                                  # noqa: BLE001
             return
         self.base_sheet, self.base_info = sheet, info
+        self._sync_captions(info)
         self._make_preview()
+
+    # ------------------------------------------------------------------ #
+    # crop tool
+    # ------------------------------------------------------------------ #
+    def toggle_crop(self):
+        self.crop_mode = not self.crop_mode
+        self.crop_drag = None
+        self.panning = None
+        if self.crop_mode:
+            self.status, self.status_ok = (
+                "Crop tool on - drag a box over the preview.", True)
+        else:
+            self.status, self.status_ok = "Crop tool off.", True
+
+    def clear_crop(self):
+        self.crop_rect = None
+        self.crop_drag = None
+        self.status, self.status_ok = (
+            "Crop cleared - the whole sheet will be saved.", True)
+
+    def crop_pixel_rect(self, size):
+        """The stored crop as a pixel rect for a surface of ``size`` (or None)."""
+        if not self.crop_rect:
+            return None
+        w, h = size
+        x0, y0, x1, y1 = self.crop_rect
+        r = pygame.Rect(int(round(x0 * w)), int(round(y0 * h)),
+                        int(round((x1 - x0) * w)), int(round((y1 - y0) * h)))
+        return r if r.width > 0 and r.height > 0 else None
+
+    def _preview_norm(self, pos):
+        """Screen point -> (nx, ny) in 0..1 of the sheet (clamped, or None)."""
+        if self.preview is None:
+            return None
+        ox, oy = self.preview_origin()
+        pw, ph = self.preview.get_size()
+        nx = (pos[0] - ox) / float(pw)
+        ny = (pos[1] - oy) / float(ph)
+        return min(1.0, max(0.0, nx)), min(1.0, max(0.0, ny))
+
+    def _finish_crop(self):
+        a, b = self.crop_drag
+        self.crop_drag = None
+        na, nb = self._preview_norm(a), self._preview_norm(b)
+        if na is None or nb is None:
+            return
+        x0, x1 = sorted((na[0], nb[0]))
+        y0, y1 = sorted((na[1], nb[1]))
+        if (x1 - x0) < 0.02 or (y1 - y0) < 0.02:
+            self.status, self.status_ok = "Crop too small - try a bigger box.", False
+            return
+        self.crop_rect = (x0, y0, x1, y1)
+        self.status, self.status_ok = (
+            "Crop = %d%% x %d%% of the sheet."
+            % (round((x1 - x0) * 100), round((y1 - y0) * 100)), True)
+
+    def _draw_crop_overlay(self, fr):
+        if self.crop_drag:
+            a, b = self.crop_drag
+            sel = pygame.Rect(min(a[0], b[0]), min(a[1], b[1]),
+                              abs(a[0] - b[0]), abs(a[1] - b[1]))
+        elif self.crop_rect:
+            ox, oy = self.preview_origin()
+            pw, ph = self.preview.get_size()
+            x0, y0, x1, y1 = self.crop_rect
+            sel = pygame.Rect(int(ox + x0 * pw), int(oy + y0 * ph),
+                              int((x1 - x0) * pw), int((y1 - y0) * ph))
+        else:
+            return
+        sel = sel.clip(fr)
+        if sel.width <= 0 or sel.height <= 0:
+            return
+        shade = pygame.Surface(fr.size, pygame.SRCALPHA)
+        shade.fill((18, 54, 78, 135))
+        pygame.draw.rect(shade, (0, 0, 0, 0),
+                         (sel.x - fr.x, sel.y - fr.y, sel.width, sel.height))
+        self.screen.blit(shade, fr.topleft)
+        pygame.draw.rect(self.screen, WHITE, sel, width=2)
+        for cx, cy in ((sel.left, sel.top), (sel.right, sel.top),
+                       (sel.left, sel.bottom), (sel.right, sel.bottom)):
+            pygame.draw.circle(self.screen, WHITE, (cx, cy), 4)
+            pygame.draw.circle(self.screen, AQUA_DEEP, (cx, cy), 4, 2)
 
     # ------------------------------------------------------------------ #
     # text boxes
     # ------------------------------------------------------------------ #
+    def _sync_captions(self, info):
+        """Turn the sheet's captions into clickable, editable text boxes.
+
+        Captions live in ``self.texts`` (kind="caption") so the existing click /
+        type / font / size editing works on them. Existing edits are kept when a
+        rebuild produces the same list of views; positions always follow the
+        fresh layout.
+        """
+        caps = (info or {}).get("captions") or []
+        old = [t for t in self.texts if t.get("kind") == "caption"]
+        new = []
+        for i, c in enumerate(caps):
+            entry = {
+                "kind": "caption",
+                "text": c.get("text", ""),
+                "default_text": c.get("text", ""),
+                "x": c.get("x", 0.5), "y": c.get("y", 0.5),
+                "size_in": c.get("size_in", ts.CAPTION_SIZE_IN),
+                "bold": c.get("bold", False),
+                "color": tuple(c.get("color", ts.CAPTION_COLOR)),
+                "font_key": self.font_key,
+                "font": FONT_FACES[self.font_key],
+            }
+            if i < len(old):
+                prev = old[i]
+                if prev.get("text") != prev.get("default_text"):
+                    entry["text"] = prev["text"]      # keep the user's edit
+                for k in ("size_in", "bold", "color", "font_key"):
+                    if k in prev:
+                        entry[k] = prev[k]
+                entry["font"] = FONT_FACES.get(entry["font_key"], entry["font"])
+            new.append(entry)
+        free = [t for t in self.texts if t.get("kind") != "caption"]
+        self.texts = free + new
+
     def add_text(self):
         n = len(self.texts)
         self.texts.append({
+            "kind": "text",
             "text": "Text",
             "x": 0.5,
             "y": min(0.9, 0.34 + 0.09 * (n % 6)),
@@ -609,6 +911,36 @@ class App:
         return (int(f.centerx + self.pan[0] - pw / 2.0),
                 int(f.centery + self.pan[1] - ph / 2.0))
 
+    def _h_state(self):
+        if self.preview is None:
+            return None
+        return (self.pan[0], self.preview.get_width(), self.PREVIEW_FRAME.width)
+
+    def _v_state(self):
+        if self.preview is None:
+            return None
+        return (self.pan[1], self.preview.get_height(), self.PREVIEW_FRAME.height)
+
+    def _pan_x(self, value):
+        self.pan = (value, self.pan[1])
+        self._clamp_pan()
+
+    def _pan_y(self, value):
+        self.pan = (self.pan[0], value)
+        self._clamp_pan()
+
+    def _on_wheel(self, event):
+        if self.preview is None:
+            return
+        pos = pygame.mouse.get_pos()
+        if not (self.PREVIEW_FRAME.collidepoint(pos)
+                or self.hscroll._hit(pos) or self.vscroll._hit(pos)):
+            return
+        step = 40
+        self.pan = (self.pan[0] - event.x * step,
+                    self.pan[1] + event.y * step)
+        self._clamp_pan()
+
     def text_screen_rect(self, i):
         """On-screen rect of text box ``i`` inside the preview (or None)."""
         sc = self.preview_scale()
@@ -638,6 +970,9 @@ class App:
         s = self.sheet.copy()
         ts.draw_texts(s, self.texts,
                       self.info.get("px_per_inch", self.info["dpi"]))
+        r = self.crop_pixel_rect(s.get_size())
+        if r:
+            s = s.subsurface(r).copy()
         return s
 
     def _drag_text(self, pos):
@@ -666,6 +1001,10 @@ class App:
         for b in self.buttons:                 # let buttons own their clicks
             if b.rect.collidepoint(pos):
                 return
+        if self.flatten_check.rect.collidepoint(pos):
+            return                             # the check box owns its click
+        if self.hscroll._hit(pos) or self.vscroll._hit(pos):
+            return                             # scrollbars handle their drags
         if self.TEXT_PANEL.collidepoint(pos):  # text panel owns its clicks too
             return
         if self.TITLE_FIELD.collidepoint(pos):
@@ -677,6 +1016,11 @@ class App:
             if self.list_row_rect(i).collidepoint(pos):
                 self.selected = i
                 return
+        if self.crop_mode:
+            if self.PREVIEW_FRAME.collidepoint(pos):
+                self.crop_drag = [pos, pos]
+                self.panning = None
+            return
         idx = self.pick_text(pos)
         if idx is not None:
             self.selected_text = idx
@@ -694,34 +1038,94 @@ class App:
     # ------------------------------------------------------------------ #
     # actions
     # ------------------------------------------------------------------ #
-    def build(self):
-        if not self.inputs:
-            self.status, self.status_ok = "Add at least one file first.", False
-            return False
+    def _begin_busy(self, msg):
+        """Show a busy frame and freeze drawing while work happens elsewhere.
+
+        Everything drawn here happens on the main thread before any worker
+        starts, so text rendering never races with the build thread.
+        """
         self.busy = True
-        self.status, self.status_ok = "Rendering views...", True
-        self._paint()
+        self.build_start = time.time()
+        self.status, self.status_ok = msg, True
+        self.draw()
+        self.busy_frame = self.screen.copy()
+        self.busy_label = font(15, True).render("Loading...", True, WHITE)
+        pygame.display.flip()
+
+    def build(self, then=None):
+        """Start a build in the background.
+
+        Returns True if a build started. If one is already running, the
+        optional ``then`` action ("send"/"save") is queued instead.
+        """
+        if self.busy:
+            if then:
+                self.pending_action = then
+            return False
+        if not self.inputs:
+            self.status, self.status_ok = "Add a source file to begin.", False
+            return False
+        self.build_error = None
+        self.build_result = None
+        self.pending_action = then
+        self._begin_busy("Building...")
+        args = dict(
+            inputs=list(self.inputs), views=self.views,
+            orientation=self.orientation, dpi=self.dpi, title=self.title_text,
+            scale=self.image_scale, spread=self.spread_psd,
+            texts=list(self.texts), crop=self.crop_pixel_rect)
+        self.build_thread = threading.Thread(
+            target=self._build_worker, args=(args,), daemon=True)
+        self.build_thread.start()
+        return True
+
+    def _build_worker(self, a):
         try:
             base_sheet, base_info = ts.build_sheet(
-                self.inputs, self.views, self.orientation, self.dpi,
-                self.title_text, elevation=8.0, image_scale=1.0,
-                psd_layers=not self.flatten_psd)
-            if abs(self.image_scale - 1.0) < 1e-6:
+                a["inputs"], a["views"], a["orientation"], a["dpi"],
+                a["title"], elevation=8.0, image_scale=1.0,
+                psd_layers=a["spread"], trim_psd=False, draw_captions=False)
+            if abs(a["scale"] - 1.0) < 1e-6:
                 sheet, info = base_sheet, base_info
             else:
                 sheet, info = ts.build_sheet(
-                    self.inputs, self.views, self.orientation, self.dpi,
-                    self.title_text, elevation=8.0, image_scale=self.image_scale,
-                    psd_layers=not self.flatten_psd)
+                    a["inputs"], a["views"], a["orientation"], a["dpi"],
+                    a["title"], elevation=8.0, image_scale=a["scale"],
+                    psd_layers=a["spread"], trim_psd=False,
+                    draw_captions=False)
             out_sheet = sheet.copy()
-            ts.draw_texts(out_sheet, self.texts,
+            ts.draw_texts(out_sheet, a["texts"],
                           info.get("px_per_inch", info["dpi"]))
+            crop = a["crop"](out_sheet.get_size())
+            if crop:
+                out_sheet = out_sheet.subsurface(crop).copy()
+                info = dict(info)
+                info["size"] = out_sheet.get_size()
+                info["sheet_in"] = (
+                    out_sheet.get_width() / float(info["dpi"]),
+                    out_sheet.get_height() / float(info["dpi"]))
             pygame.image.save(out_sheet, str(OUT))
+            self.build_result = (base_sheet, base_info, sheet, info)
         except Exception as exc:                          # noqa: BLE001
-            self.busy = False
-            self.status, self.status_ok = "Build failed: %s" % exc, False
-            return False
+            self.build_error = exc
+
+    def _poll_build(self):
+        if self.busy and self.build_thread and not self.build_thread.is_alive():
+            self.build_thread.join()
+            self.build_thread = None
+            self._apply_build()
+
+    def _apply_build(self):
+        action, self.pending_action = self.pending_action, None
         self.busy = False
+        self.busy_frame = None
+        if self.build_error is not None:
+            self.status, self.status_ok = "Build failed: %s" % self.build_error, False
+            self.build_error = None
+            return
+        base_sheet, base_info, sheet, info = self.build_result
+        self.build_result = None
+        self._sync_captions(base_info)
         self.sheet, self.info = sheet, info
         self.base_sheet, self.base_info = base_sheet, base_info
         self._make_preview()
@@ -729,10 +1133,28 @@ class App:
                        % (info["size"][0], info["size"][1], info["dpi"],
                           info["views"], OUT.name))
         self.status_ok = True
-        return True
+        if action == "send":
+            self._do_send()
+        elif action == "save":
+            self._do_save_as()
 
     def send(self):
-        if not self.build():
+        if self.inputs:
+            self.build(then="send")
+
+    def _do_send(self):
+        self._begin_busy("Sending to Photoshop...")
+        ok, msg = ts.send_to_photoshop(OUT, self.info)
+        self.busy = False
+        self.busy_frame = None
+        self.status, self.status_ok = msg, ok
+
+    def save_as(self):
+        if self.inputs:
+            self.build(then="save")
+
+    def _do_save_as(self):
+        if self.sheet is None:
             return
         self.busy = True
         self.status, self.status_ok = "Sending to Photoshop...", True
@@ -789,6 +1211,10 @@ class App:
     def handle(self, event):
         if event.type == pygame.QUIT:
             return False
+        if self.busy:
+            if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
+                return False
+            return True
         if event.type == pygame.KEYDOWN:
             if self.text_focus and self.selected_text is not None:
                 self._edit_text(event)
@@ -807,12 +1233,20 @@ class App:
             if event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
                 self.build()
             return True
+        if event.type == pygame.MOUSEWHEEL:
+            self._on_wheel(event)
+            return True
         if event.type in (pygame.MOUSEBUTTONDOWN, pygame.MOUSEBUTTONUP,
                           pygame.MOUSEMOTION):
             self.size_slider.handle(event)
             self.scale_slider.handle(event)
+            self.hscroll.handle(event)
+            self.vscroll.handle(event)
+            self.flatten_check.handle(event)
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
             self._on_click(event.pos)
+        elif event.type == pygame.MOUSEMOTION and self.crop_drag:
+            self.crop_drag[1] = event.pos
         elif event.type == pygame.MOUSEMOTION and self.text_drag:
             self._drag_text(event.pos)
         elif event.type == pygame.MOUSEMOTION and self.panning:
@@ -822,6 +1256,8 @@ class App:
                         self.panning["pan"][1] + dy)
             self._clamp_pan()
         elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+            if self.crop_drag:
+                self._finish_crop()
             self.text_drag = None
             self.panning = None
         for b in self.buttons:
@@ -850,6 +1286,7 @@ class App:
         self.draw_status()
         for b in self.buttons:
             b.draw(screen)
+        self.flatten_check.draw(screen)
 
     def draw_header(self):
         text_shadow(self.screen, "Turnaround Studio", font(40, True), WHITE,
@@ -939,7 +1376,8 @@ class App:
         text_shadow(self.screen, "Preview", font(19, True), INK,
                     (p.x + 18, p.y + 14), sh=(255, 255, 255))
         self.screen.blit(font(12).render(
-            "drag to pan the zoomed sheet", True, INK_SOFT),
+            "drag a box to crop" if self.crop_mode
+            else "drag or scroll to pan the sheet", True, INK_SOFT),
             (p.x + 110, p.y + 20))
         fr = self.PREVIEW_FRAME
         self.screen.blit(rounded(fr.size, 10, (255, 255, 255, 185)),
@@ -955,7 +1393,7 @@ class App:
                                                  self.base_info["dpi"]) * sc)
             clip = self.screen.get_clip()
             self.screen.set_clip(fr)
-            self.screen.blit(disp, disp.get_rect(center=fr.center))
+            self.screen.blit(disp, self.preview_origin())
             if self.selected_text is not None:
                 r = self.text_screen_rect(self.selected_text)
                 if r:
@@ -966,6 +1404,8 @@ class App:
                         pygame.draw.line(self.screen, AQUA_DEEP,
                                          (r.right + 3, r.top - 2),
                                          (r.right + 3, r.bottom + 2), 2)
+            if self.crop_mode or self.crop_rect:
+                self._draw_crop_overlay(fr)
             zoom = font(14, True).render(
                 "%d%%" % int(round(self.image_scale * 100)), True, AQUA_DEEP)
             self.screen.blit(zoom, (fr.right - zoom.get_width() - 10,
@@ -975,10 +1415,27 @@ class App:
             msg = font(15).render("Build to see your turnaround sheet", True,
                                   INK_SOFT)
             self.screen.blit(msg, msg.get_rect(center=fr.center))
-        if self.busy:
-            self.screen.blit(font(16, True).render("working...", True,
-                                                   AQUA_DEEP),
-                             (p.x + 18, p.bottom - 30))
+        self.hscroll.draw(self.screen)
+        self.vscroll.draw(self.screen)
+
+    def draw_busy(self):
+        """Blit the frozen busy frame plus an animated loading spinner.
+
+        Runs without any font rendering so it can never race the build thread;
+        the "Loading..." label is pre-rendered in ``_begin_busy``.
+        """
+        self.screen.blit(self.busy_frame, (0, 0))
+        if time.time() - self.build_start < LOADING_DELAY:
+            return
+        fr = self.PREVIEW_FRAME
+        overlay = pygame.Surface(fr.size, pygame.SRCALPHA)
+        overlay.fill((10, 28, 44, 165))
+        self.screen.blit(overlay, fr.topleft)
+        cx, cy = fr.center
+        draw_loading_spinner(self.screen, (cx, cy - 16), self.t * SPIN_SPEED)
+        if self.busy_label is not None:
+            self.screen.blit(self.busy_label,
+                             self.busy_label.get_rect(center=(cx, cy + 40)))
 
     def draw_text_panel(self):
         p = self.TEXT_PANEL
@@ -1020,7 +1477,11 @@ class App:
             for event in pygame.event.get():
                 if not self.handle(event):
                     self.running = False
-            self.draw()
+            self._poll_build()
+            if self.busy and self.busy_frame is not None:
+                self.draw_busy()
+            else:
+                self.draw()
             pygame.display.flip()
         pygame.quit()
 

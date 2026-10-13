@@ -1,7 +1,7 @@
 # pfa-week05
 Fiori Sims Week 5 Homework for Programming for Animators FA26 
 Photoshop Bridge
-How to run: Install turnaround_sheet.py file, Open Terminal, ask agent to run turnaround_sheet.py. Insert .png,.jpeg, or .mb file. Click "send to photoshop".
+How to run: Install turnaround_gui.py file, Open Terminal, ask agent to run turnaround_gui.py. Insert .png,.jpeg, or .mb file. Click "send to photoshop".
 Asked agent to create a bridge between the terminal and Photoshop and create a simple UI where I can upload an image/Maya file that creates a full-body turnaround sheet of the model. 
 Recording: https://drive.google.com/file/d/1QxCBU2fqnB5vpCianzwfmMu_ZGBTjxHk/view?usp=sharing
 
