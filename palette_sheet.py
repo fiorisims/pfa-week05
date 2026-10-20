@@ -42,6 +42,7 @@ import pygame
 
 HERE = Path(__file__).resolve().parent
 OUT_DEFAULT = HERE / "palette_sheet.png"
+ACO_DEFAULT = HERE / "color_script.aco"
 STRIP_DIR = HERE / "_palette_strips"
 
 DOC_NAME = "Color Script"
@@ -398,15 +399,28 @@ def plan_layout(palettes, shape="square", orientation="horizontal", cols=4,
         img_band = (max(t["h"] for t in thumbs) + IMAGE_GAP) if thumbs else 0
         blocks.append({"label": label, "colors": colors, "cols": c, "rows": r,
                        "w": bw, "h": bh, "thumbs": thumbs, "img_band": img_band})
-    max_img_band = max(b["img_band"] for b in blocks)
+    # Palettes in a row share one baseline (tallest image band wins) so stacked
+    # / vertical sheets keep their swatch rows aligned; a horizontal sheet gives
+    # each block its own band so a short image does not leave a huge gap.
+    row_img_band = max(b["img_band"] for b in blocks)
+    for b in blocks:
+        b["band"] = (row_img_band if orientation in ("vertical", "grid")
+                     else b["img_band"])
+    max_img_band = max(b["band"] for b in blocks)
 
     body_gap = COLUMN_GAP if orientation == "vertical" else BLOCK_GAP
     body_w = (sum(b["w"] for b in blocks) + body_gap * (len(blocks) - 1)
               if orientation == "vertical" else max(b["w"] for b in blocks))
-    block_h = (caption_band + max_img_band + max(b["h"] for b in blocks)
-               + label_band + strip_band)
-    body_h = (block_h if orientation == "vertical"
-              else len(blocks) * block_h + body_gap * (len(blocks) - 1))
+    for b in blocks:
+        b["block_h"] = (caption_band + b["band"] + b["h"]
+                        + label_band + strip_band)
+    if orientation == "vertical":
+        block_h = max(b["block_h"] for b in blocks)
+        body_h = block_h
+    else:
+        block_h = max(b["block_h"] for b in blocks)
+        body_h = (sum(b["block_h"] for b in blocks)
+                  + body_gap * (len(blocks) - 1))
 
     title_band = (TITLE_SIZE + 28) if title else 8
     W = int(MARGIN * 2 + body_w)
@@ -427,14 +441,16 @@ def plan_layout(palettes, shape="square", orientation="horizontal", cols=4,
 
     top = MARGIN + title_band
     x_cursor = MARGIN
+    y_cursor = top
     for pi, b in enumerate(blocks):
         if orientation == "vertical":
             bx = x_cursor
-            by = top
+            by = y_cursor
             x_cursor += b["w"] + COLUMN_GAP
         else:
             bx = MARGIN
-            by = top + pi * (block_h + BLOCK_GAP)
+            by = y_cursor
+            y_cursor += b["block_h"] + BLOCK_GAP
 
         pal = {"label": b["label"],
                "layer_name": "Palette %d - %s" % (pi + 1, b["label"]),
@@ -458,7 +474,7 @@ def plan_layout(palettes, shape="square", orientation="horizontal", cols=4,
                     "png": None, "surf": t["surf"], "dx": 0, "dy": 0})
                 tx += t["w"] + IMAGE_GAP
 
-        grid_top = by + caption_band + max_img_band
+        grid_top = by + caption_band + b["band"]
         for i, color in enumerate(b["colors"]):
             col = i % b["cols"]
             row = i // b["cols"]
@@ -636,16 +652,14 @@ def render_spec(spec):
         surf.blit(img, img.get_rect(center=(int(title["cx"] + dx),
                                             int(title["y"] + dy))))
 
+    # Draw in explicit z-ordered passes so a text label can never be painted
+    # over: images first, then swatches, then every caption/label on top, then
+    # the gradient strips. (Within a pass the draw order does not matter.)
     for pal in spec["palettes"]:
-        cap = pal.get("caption")
-        if cap:
-            dx, dy = _off(cap)
-            img = font(int(cap["size"]), bool(cap.get("bold"))).render(
-                cap["text"], True, tuple(cap["color"]))
-            surf.blit(img, img.get_rect(center=(int(cap["cx"] + dx),
-                                                int(cap["y"] + dy))))
         for im in pal.get("images", []):
             _blit_png(surf, im)
+
+    for pal in spec["palettes"]:
         for sw in pal["swatches"]:
             color = tuple(sw["color"])
             dx, dy = _off(sw)
@@ -659,13 +673,28 @@ def render_spec(spec):
                                  border_radius=int(min(w, h) * 0.22))
             else:
                 pygame.draw.rect(surf, color, (x, y, w, h))
-            if sw.get("label_cx") is not None:
-                img = font(int(sw.get("label_size", LABEL_SIZE))).render(
-                    sw["hex"], True, tuple(sw.get("label_color",
-                                                  DEFAULT_LABEL_COLOR)))
-                surf.blit(img, img.get_rect(
-                    center=(int(sw["label_cx"] + dx),
-                            int(sw["label_y"] + dy))))
+
+    # captions and hex labels are the topmost text: nothing can cover them
+    for pal in spec["palettes"]:
+        cap = pal.get("caption")
+        if cap:
+            dx, dy = _off(cap)
+            img = font(int(cap["size"]), bool(cap.get("bold"))).render(
+                cap["text"], True, tuple(cap["color"]))
+            surf.blit(img, img.get_rect(center=(int(cap["cx"] + dx),
+                                                int(cap["y"] + dy))))
+        for sw in pal["swatches"]:
+            if sw.get("label_cx") is None:
+                continue
+            dx, dy = _off(sw)
+            img = font(int(sw.get("label_size", LABEL_SIZE))).render(
+                sw["hex"], True, tuple(sw.get("label_color",
+                                              DEFAULT_LABEL_COLOR)))
+            surf.blit(img, img.get_rect(
+                center=(int(sw["label_cx"] + dx),
+                        int(sw["label_y"] + dy))))
+
+    for pal in spec["palettes"]:
         if pal.get("strip"):
             _blit_png(surf, pal["strip"])
     return surf
@@ -745,12 +774,66 @@ def build_palette_jsx(spec):
     return template % payload
 
 
-def send_to_photoshop(spec, doc_name=None):
+def aco_entries(palettes):
+    """Palette colours -> ``[(r, g, b, "Name"), ...]`` for :func:`write_aco`.
+
+    Accepts either the ``[(label, [(r, g, b), ...]), ...]`` list that
+    :func:`build_sheet` returns, or the spec's ``spec["palettes"]`` list of
+    dicts (each carrying a ``label`` and ``swatches[*]["color"]``).
+    """
+    entries = []
+    for pal in palettes:
+        if isinstance(pal, dict):
+            label = str(pal.get("label") or "Palette")[:20]
+            colors = [s.get("color") for s in pal.get("swatches", [])]
+        else:
+            label, colors = pal
+            label = str(label)[:20]
+        for i, c in enumerate(colors, 1):
+            if not c:
+                continue
+            entries.append((int(c[0]), int(c[1]), int(c[2]),
+                            "%s %d" % (label, i)))
+    return entries
+
+
+def import_swatches(spec, path=None):
+    """Write the palette as a Photoshop ``.aco`` swatch file.
+
+    This is how the colours get into Photoshop's Swatches panel: the panel
+    itself is **not scriptable** in Photoshop 2026 (``addSwatch`` and the
+    swatch ``make``/``set`` Action Manager events are all unavailable), so the
+    file is written next to the sheet and loaded with a single click --
+    Swatches panel menu > Load Swatches (you can also just drag the ``.aco``
+    onto the panel).
+
+    ``spec`` may be the layout dict from :func:`build_sheet` or a plain
+    ``[(label, [colors]), ...]`` palette list. Returns the path written.
+    """
+    palettes = spec.get("palettes", []) if isinstance(spec, dict) else spec
+    entries = aco_entries(palettes)
+    if not entries:
+        raise ValueError("no palette colours to export")
+    return write_aco(entries, path if path is not None else ACO_DEFAULT)
+
+
+def send_to_photoshop(spec, doc_name=None, aco_path=None):
     """Rebuild the layout as a native Photoshop document via the bridge.
+
+    It also writes the palette as a Photoshop ``.aco`` swatch file
+    automatically (see :func:`import_swatches`) and appends its path to the
+    returned message, so the colours can be loaded into the Swatches panel
+    with one click.
 
     Returns ``(ok, message)``; never raises for scripting problems (they come
     back as ``ok=False`` with the bridge's error text).
     """
+    note = ""
+    try:
+        aco = import_swatches(spec, aco_path)
+        note = "  |  swatches: %s  (Swatches panel > Load Swatches)" % aco
+    except Exception as exc:                                   # noqa: BLE001
+        note = "  |  swatch file skipped: %s" % exc
     if doc_name:
         spec["doc_name"] = doc_name
     payload = build_palette_jsx(spec)
@@ -758,10 +841,10 @@ def send_to_photoshop(spec, doc_name=None):
         import photoshop_bridge
         text = photoshop_bridge.run(payload).strip()
     except Exception as exc:                                   # noqa: BLE001
-        return False, "Photoshop error: %s" % exc
+        return False, "Photoshop error: %s%s" % (exc, note)
     line = next((ln for ln in text.splitlines()
                  if ln.startswith("__result__")), text)
-    return "BRIDGE ERROR" not in text, line
+    return "BRIDGE ERROR" not in text, line + note
 
 
 def write_aco(entries, path):
@@ -852,12 +935,7 @@ def main(argv=None):
              sum(len(c) for _l, c in palettes)))
 
     if a.aco:
-        entries = []
-        for label, colors in palettes:
-            for i, c in enumerate(colors, 1):
-                entries.append((c[0], c[1], c[2],
-                                "%s %d" % (label[:20], i)))
-        write_aco(entries, a.aco)
+        write_aco(aco_entries(palettes), a.aco)
         print("wrote %s  (load it in the Swatches panel > Load Swatches)"
               % a.aco)
 

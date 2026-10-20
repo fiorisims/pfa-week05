@@ -142,18 +142,15 @@ if (SPEC.title) {
     textCount++;
 }
 
+// Layers are stacked to match the PNG renderer's draw order. The PNG draws in
+// explicit z-ordered passes - images, then swatches, then captions/labels on
+// top, then strips - so a label can never be covered by an image no matter how
+// the items are dragged. We mirror that order here with the same passes.
+
+// pass 1: swatch fill layers (one layer per palette) with images placed
+// directly underneath them
 for (var pi = 0; pi < SPEC.palettes.length; pi++) {
     var pal = SPEC.palettes[pi];
-
-    // Layers are stacked to match the PNG renderer's draw order (bottom -> top:
-    // caption, images, swatches, labels, strip) so a hand-moved item that
-    // overlaps another looks identical in the PSD and the preview.
-    if (pal.caption) {
-        addText(doc, pal.caption.text, pal.caption.cx + ox(pal.caption),
-                pal.caption.y + oy(pal.caption), pal.caption.size,
-                pal.caption.color, pal.caption.bold, true, pal.caption.text);
-        textCount++;
-    }
 
     var layer = doc.artLayers.add();
     layer.name = pal.layer_name;
@@ -164,7 +161,7 @@ for (var pi = 0; pi < SPEC.palettes.length; pi++) {
         swatchCount++;
     }
 
-    // images sit directly under the swatches (above the caption)
+    // images sit directly under the swatches of their own palette
     if (pal.images) {
         for (var ii = 0; ii < pal.images.length; ii++) {
             var im = pal.images[ii];
@@ -173,18 +170,33 @@ for (var pi = 0; pi < SPEC.palettes.length; pi++) {
             imageCount++;
         }
     }
+}
 
-    for (var li = 0; li < pal.swatches.length; li++) {
-        var lw = pal.swatches[li];
+// pass 2: captions and hex labels on top of every image and swatch
+for (var pj = 0; pj < SPEC.palettes.length; pj++) {
+    var pal2 = SPEC.palettes[pj];
+    if (pal2.caption) {
+        addText(doc, pal2.caption.text, pal2.caption.cx + ox(pal2.caption),
+                pal2.caption.y + oy(pal2.caption), pal2.caption.size,
+                pal2.caption.color, pal2.caption.bold, true,
+                pal2.caption.text);
+        textCount++;
+    }
+    for (var li = 0; li < pal2.swatches.length; li++) {
+        var lw = pal2.swatches[li];
         if (lw.label_cx === undefined || lw.label_cx === null) { continue; }
         addText(doc, lw.hex, lw.label_cx + ox(lw), lw.label_y + oy(lw),
                 lw.label_size, lw.label_color, false, true, lw.hex);
         textCount++;
     }
+}
 
-    if (pal.strip && pal.strip.png) {
-        placePng(doc, pal.strip.png, pal.strip.x + ox(pal.strip),
-                 pal.strip.y + oy(pal.strip), pal.strip.name);
+// pass 3: gradient strips on top
+for (var pk = 0; pk < SPEC.palettes.length; pk++) {
+    var pal3 = SPEC.palettes[pk];
+    if (pal3.strip && pal3.strip.png) {
+        placePng(doc, pal3.strip.png, pal3.strip.x + ox(pal3.strip),
+                 pal3.strip.y + oy(pal3.strip), pal3.strip.name);
         stripCount++;
     }
 }

@@ -205,6 +205,79 @@ def test_layout():
           with_img["palettes"][0]["swatches"][0]["id"] == "sw:0:0",
           "planned elements get stable ids")
 
+    # horizontal rows give each palette its own image band (a short image must
+    # not reserve the tallest image's height), while vertical stays aligned
+    tall = pygame.Surface((60, 400))
+    tall.fill((10, 10, 10))
+    wide = pygame.Surface((600, 60))
+    wide.fill((10, 10, 10))
+    mixed = ps.plan_layout([("t", [(1, 2, 3)]), ("w", [(4, 5, 6)])], swatch=100,
+                           gap=20, images=[[(tall, "t")], [(wide, "w")]],
+                           image_size=200)
+    gaps = []
+    for p in mixed["palettes"]:
+        bottom = max(i["y"] + i["h"] for i in p["images"])
+        top = min(s["y"] for s in p["swatches"])
+        gaps.append(top - bottom)
+    check(len(set(gaps)) == 1 and gaps[0] == ps.IMAGE_GAP,
+          "horizontal: every palette keeps the same image->swatch gap (%s)"
+          % gaps)
+    vmixed = ps.plan_layout([("t", [(1, 2, 3)]), ("w", [(4, 5, 6)])],
+                            orientation="vertical", swatch=100, gap=20,
+                            images=[[(tall, "t")], [(wide, "w")]],
+                            image_size=200)
+    tops = [min(s["y"] for s in p["swatches"]) for p in vmixed["palettes"]]
+    check(len(set(tops)) == 1, "vertical: swatch rows stay aligned (%s)" % tops)
+
+
+def test_label_on_top(tmp):
+    """A hex label must never be covered by a source image (both directions)."""
+    blue = pygame.Surface((200, 200))
+    blue.fill((0, 120, 255))
+    pal = [("a", [(0, 0, 0)] * 2), ("b", [(0, 0, 0)] * 2)]
+    spec = ps.plan_layout(pal, swatch=90, gap=16, labels=True, gradients=False,
+                          captions=False, bg=(24, 30, 40),
+                          images=[[(blue, "a")], [(blue, "b")]])
+    ps.save_strip_pngs(spec)
+    label = spec["palettes"][0]["swatches"][0]
+    img1 = spec["palettes"][1]["images"][0]
+    # drag palette 1's image up so it sits right over palette 0's hex label
+    ps.set_offset(spec, img1["id"], 0,
+                  label["label_y"] - (img1["y"] + img1["h"] / 2.0))
+    sheet = ps.render_spec(spec)
+    ink = {tuple(c) for c in (label["label_color"],)} | \
+          set(tuple(sheet.get_at((int(label["label_cx"]) + dx,
+                                  int(label["label_y"]) + dy))[:3])
+              for dx in (-2, 0, 2) for dy in (-2, 0, 2))
+    bg = tuple(spec["bg"])
+    covered = 0
+    for x in range(int(label["label_cx"]) - 45, int(label["label_cx"]) + 45):
+        for y in range(int(label["label_y"]) - 10, int(label["label_y"]) + 6):
+            px = tuple(sheet.get_at((x, y))[:3])
+            if px != bg and px != (0, 120, 255):
+                covered += 1
+    check(covered > 0,
+          "the hex label is drawn on top of a later palette's image (%d ink px)"
+          % covered)
+    # rebuild a fresh spec and drag the SAME palette's image onto its own label
+    spec2 = ps.plan_layout(pal, swatch=90, gap=16, labels=True, gradients=False,
+                           captions=False, bg=(24, 30, 40),
+                           images=[[(blue, "a")], [(blue, "b")]])
+    ps.save_strip_pngs(spec2)
+    lb = spec2["palettes"][0]["swatches"][0]
+    own = spec2["palettes"][0]["images"][0]
+    ps.set_offset(spec2, own["id"],
+                  lb["label_cx"] - (own["x"] + own["w"] / 2.0),
+                  lb["label_y"] - (own["y"] + own["h"] / 2.0))
+    s2 = ps.render_spec(spec2)
+    bg2 = tuple(spec2["bg"])
+    ink2 = sum(1 for x in range(int(lb["label_cx"]) - 45,
+                                int(lb["label_cx"]) + 45)
+               for y in range(int(lb["label_y"]) - 10, int(lb["label_y"]) + 6)
+               if tuple(s2.get_at((x, y))[:3]) not in (bg2, (0, 120, 255)))
+    check(ink2 > 0, "the hex label survives its own palette's image dragged over "
+                    "it (%d ink px)" % ink2)
+
 
 def test_items(tmp):
     red = make_red(tmp / "it_red.png", 40)
@@ -313,6 +386,34 @@ def test_aco(tmp):
     check(cid2 == 2 and r2 == 12 * 257 and name[0] == 1 and name[1:2] == b"A",
           "aco v2 name round-trips")
 
+    ents = ps.aco_entries([("img", [(10, 20, 30), (200, 210, 220)])])
+    check(ents == [(10, 20, 30, "img 1"), (200, 210, 220, "img 2")],
+          "aco_entries from a palette list")
+    spec_like = {"palettes": [{"label": "sky", "swatches": [
+        {"id": "sw:0:0", "color": [1, 2, 3]},
+        {"id": "sw:0:1", "color": [40, 50, 60]}]}]}
+    check(ps.aco_entries(spec_like["palettes"])
+          == [(1, 2, 3, "sky 1"), (40, 50, 60, "sky 2")],
+          "aco_entries from a spec dict")
+    p = ps.import_swatches(spec_like, tmp / "auto.aco")
+    check(p.read_bytes()[2:4] == struct.pack(">H", 2),
+          "import_swatches writes a 2-colour .aco")
+    p2 = ps.import_swatches([("b", [(9, 8, 7)])], tmp / "list.aco")
+    check(p2.exists(), "import_swatches accepts a palette list")
+    try:
+        ps.import_swatches([], tmp / "empty.aco")
+        check(False, "import_swatches raises on an empty palette")
+    except ValueError:
+        check(True, "import_swatches raises on an empty palette")
+    old_default = ps.ACO_DEFAULT
+    ps.ACO_DEFAULT = tmp / "default.aco"
+    try:
+        p3 = ps.import_swatches(spec_like)
+        check(p3 == tmp / "default.aco" and p3.exists(),
+              "import_swatches defaults to ACO_DEFAULT")
+    finally:
+        ps.ACO_DEFAULT = old_default
+
 
 def test_cli(tmp):
     red = make_red(tmp / "r.png")
@@ -350,8 +451,11 @@ def test_live(tmp):
         labels=True, gradients=True, bg=(255, 255, 255), title="Live test")
 
     try:
-        ok, msg = ps.send_to_photoshop(spec, LIVE_DOC)
+        aco_out = tmp / "live_auto.aco"
+        ok, msg = ps.send_to_photoshop(spec, LIVE_DOC, aco_path=aco_out)
         check(ok and "color script:" in msg, "send_to_photoshop: %s" % msg)
+        check(aco_out.exists() and "swatches:" in msg,
+              "send auto-writes the .aco: %s" % msg)
         if not ok:
             return
 
@@ -496,6 +600,33 @@ def test_gui(tmp):
     app._zoom(1.5, app.PREVIEW_FRAME.center)
     check(app.zoom is not None, "GUI zooms the preview")
 
+    check(app.more is False, "GUI hides the advanced options by default")
+
+    def click(rect):
+        app.handle(pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=1,
+                                      pos=rect.center))
+        app.handle(pygame.event.Event(pygame.MOUSEBUTTONUP, button=1,
+                                      pos=rect.center))
+
+    shape_btn = app.more_buttons[0]                 # the "Square" button
+    before = app.shape
+    click(shape_btn.rect)
+    check(app.shape == before,
+          "advanced widgets are inert while the options are collapsed")
+
+    app._set_gap(10)
+    app.draw()
+    click(app.more_button.rect)
+    check(app.more is True, "the More options button expands the panel")
+    click(shape_btn.rect)
+    check(app.shape == "square", "advanced widgets work once expanded")
+    check(app.options()["gap"] == 10,
+          "expanded options still feed build_sheet")
+    app.draw()
+    click(app.more_button.rect)
+    check(app.more is False and app.shape == "square",
+          "collapsing keeps the chosen values")
+
     app.draw()
     app.draw_status()
     check(True, "GUI draw() runs without a display")
@@ -522,6 +653,7 @@ def main(argv=None):
         test_extraction(tmp)
         test_helpers()
         test_layout()
+        test_label_on_top(tmp)
         test_items(tmp)
         test_build(tmp)
         test_aco(tmp)
