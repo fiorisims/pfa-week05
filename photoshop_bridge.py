@@ -25,41 +25,69 @@ directives are not supported (the source is eval'd).
 
 import argparse
 import glob
+import json
+import os
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 HOOK = HERE / "photoshop_hook.jsx"
-IN = HERE / "_ps_in.jsx"
-OUT = HERE / "_ps_out.txt"
-RUNNER = HERE / "_ps_run.jsx"       # macOS: the hook + call written as one file
+# Staging files go to the system temp dir, not next to the code: the project
+# folder may be read-only (installed as a package) or OneDrive-synced, where
+# writing _ps_in.jsx / _ps_out.txt next to the sources can fail or churn sync.
+STAGE = Path(tempfile.gettempdir()) / "photoshop_bridge"
+STAGE.mkdir(parents=True, exist_ok=True)
+IN = STAGE / "_ps_in.jsx"
+OUT = STAGE / "_ps_out.txt"
+RUNNER = STAGE / "_ps_run.jsx"      # macOS: the hook + call written as one file
 PROGID = "Photoshop.Application"
 EXEC_MODE = 1          # psJavaScriptExecutionMode.psNeverShowDebugger
 DEBUG_MODE = 2         # psJavaScriptExecutionMode.psDebuggerOnError
 
-MAC_APPS = "/Applications/Adobe Photoshop*.app"
+# Photoshop installs either as /Applications/Adobe Photoshop 2026.app or one
+# folder deeper, /Applications/Adobe Photoshop 2026/Adobe Photoshop 2026.app.
+MAC_APP_GLOBS = (
+    "/Applications/Adobe Photoshop*.app",
+    "/Applications/Adobe Photoshop */Adobe Photoshop*.app",
+)
 MAC_TIMEOUT = 600
 
 
 def to_js(path):
-    return str(path).replace("\\", "/")
+    """A JS string literal for a path (quotes, spaces, accents all safe)."""
+    return json.dumps(str(path).replace("\\", "/"))
 
 
 def _mac_photoshop_app():
     """Newest installed Photoshop app bundle on macOS, or None."""
-    apps = sorted(glob.glob(MAC_APPS))
+    apps = []
+    for pattern in MAC_APP_GLOBS:
+        apps.extend(glob.glob(pattern))
+    # de-dupe (the shallow glob can re-match a deeper bundle's name) and pick
+    # the newest by version so a machine with several installs uses the latest
+    apps = sorted(set(apps))
     return apps[-1] if apps else None
 
 
 def connect(debug_mode):
     """Attach to (or launch) Photoshop. Returns a handle for ``run``."""
     if sys.platform.startswith("win"):
-        import pythoncom
-        import win32com.client
+        try:
+            import pythoncom
+            import win32com.client
+        except ImportError as exc:
+            raise RuntimeError(
+                "the Photoshop bridge needs pywin32 on Windows (%s).\n"
+                "Install it for the interpreter you run the tool with:\n"
+                "    python -m pip install pywin32\n"
+                "(you may need to run the tool from a terminal opened after "
+                "the install)." % exc) from exc
 
         pythoncom.CoInitialize()
+        launched = False
         try:
             app = win32com.client.GetActiveObject(PROGID)
         except pythoncom.com_error:
@@ -67,19 +95,25 @@ def connect(debug_mode):
                   "(the first call can take a minute)...", file=sys.stderr)
             try:
                 app = win32com.client.Dispatch(PROGID)
+                launched = True
             except pythoncom.com_error as exc:
                 raise RuntimeError(
                     "cannot talk to Photoshop via COM (%s).\n"
                     "Is Adobe Photoshop installed? Try launching it once by hand."
                     % exc) from exc
         app.DoJavaScript("1", [], debug_mode)   # touch the engine early
+        if launched:
+            print("[bridge] connected to %s %s" % (app.Name, app.Version),
+                  file=sys.stderr)
         return app
 
     if sys.platform == "darwin":
         app = _mac_photoshop_app()
         if not app:
             raise RuntimeError(
-                "Adobe Photoshop was not found in /Applications.\n"
+                "Adobe Photoshop was not found in /Applications "
+                "(looked for Adobe Photoshop*.app and "
+                "/Applications/Adobe Photoshop */Adobe Photoshop*.app).\n"
                 "Install it, or the app bundle is named unexpectedly.")
         return app                               # the bundle path is the handle
 
@@ -93,7 +127,7 @@ def _mac_do_javascript(app_path, script, debug):
     name = Path(app_path).stem                   # e.g. "Adobe Photoshop 2026"
     RUNNER.write_text(script, encoding="utf-8")
     lines = [
-        'set jsxFile to (POSIX file "%s")' % RUNNER.as_posix(),
+        'set jsxFile to (POSIX file %s)' % _osa_str(RUNNER.as_posix()),
         "set jsxCode to read jsxFile as \u00abclass utf8\u00bb",
         'tell application "%s" to do javascript jsxCode%s'
         % (name, " showing debugger" if debug else ""),
@@ -110,9 +144,24 @@ def _mac_do_javascript(app_path, script, debug):
         raise RuntimeError("Photoshop (macOS) timed out after %ds."
                            % MAC_TIMEOUT) from exc
     if proc.returncode != 0:
-        raise RuntimeError("Photoshop (macOS) error: %s"
-                           % ((proc.stderr or proc.stdout or "").strip()
-                              or "unknown error"))
+        err = (proc.stderr or proc.stdout or "").strip() or "unknown error"
+        # -1743 / "Not authorized to send Apple events" = the one-time
+        # Automation permission was denied (or never granted).
+        if "-1743" in err or "not allowed" in err.lower() \
+                or "not authorized" in err.lower():
+            raise RuntimeError(
+                "macOS blocked the bridge from controlling Photoshop.\n"
+                "Allow it in System Settings > Privacy & Security > "
+                "Automation: switch on Photoshop for your terminal (or the "
+                "app running this script). If nothing is listed there, send "
+                "once more and click OK on the permission prompt.\n"
+                "(original error: %s)" % err) from None
+        raise RuntimeError("Photoshop (macOS) error: %s" % err)
+
+
+def _osa_str(text):
+    """Quote a string for an AppleScript literal."""
+    return '"%s"' % str(text).replace("\\", "\\\\").replace('"', '\\"')
 
 
 def run(code, debug=False, app=None):
@@ -126,7 +175,7 @@ def run(code, debug=False, app=None):
         app = connect(DEBUG_MODE if debug else EXEC_MODE)
 
     hook = HOOK.read_text(encoding="utf-8-sig")
-    script = "%s\n__bridge_run__(\"%s\", \"%s\");" % (hook, to_js(IN), to_js(OUT))
+    script = "%s\n__bridge_run__(%s, %s);" % (hook, to_js(IN), to_js(OUT))
 
     if isinstance(app, str):                     # macOS app-bundle path
         _mac_do_javascript(app, script, debug)

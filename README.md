@@ -13,3 +13,40 @@ What Chore Does The Tool End: Creating a color script layout by hand and using t
 3 week goals: Have the program function seamlessly and possibly have an in-photoshop option editor 
 
 UI: https://drive.google.com/file/d/1-1poFaTcrw8bYwfcpXH836sC8DdxOisZ/view?usp=sharing
+
+## How to install and run
+
+### Windows
+1. Install Python 3.10+ (`winget install Python.Python.3.12` in PowerShell).
+2. Install the libraries the tool needs (pywin32 is how we talk to Photoshop on Windows):
+   ```powershell
+   python -m pip install pygame pywin32
+   ```
+3. Run the app:
+   ```powershell
+   python palette_gui.py
+   ```
+
+### macOS
+1. Install Python 3.10+ (e.g. `brew install python`).
+2. Install pygame (pywin32 is Windows-only and not needed):
+   ```bash
+   python3 -m pip install pygame
+   ```
+3. Run the app:
+   ```bash
+   python3 palette_gui.py
+   ```
+
+### Check the Photoshop connection first (either OS)
+Before you trust a "Send to Photoshop", confirm the bridge can reach Photoshop:
+```powershell
+python photoshop_bridge.py --ping     # Windows
+python3 photoshop_bridge.py --ping    # macOS
+```
+It prints something like `__result__ = Adobe Photoshop 27.11.0`. On macOS the
+first call asks for permission to control Photoshop (System Settings >
+Privacy & Security > Automation); if `--ping` fails, the bridge tells you
+where to turn that back on. On Windows it says how to install pywin32 if it
+is missing, and which Photoshop version it connected to.
+
