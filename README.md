@@ -50,3 +50,12 @@ Privacy & Security > Automation); if `--ping` fails, the bridge tells you
 where to turn that back on. On Windows it says how to install pywin32 if it
 is missing, and which Photoshop version it connected to.
 
+### Send speed
+"Sending to Photoshop" used to take 86-103 s for a 3-palette sheet. It now
+builds the whole document with **Place Embedded** and wraps the build in a
+single history state (`doc.suspendHistory`), so the same sheet lands in about
+**41 s (~2.2x faster)**. The document it produces is unchanged - only the
+route to it is faster. A representative sheet was checked against the pygame
+render: swatches, images and gradient strips match pixel-for-pixel, and only
+text anti-aliasing differs (pygame and Photoshop rasterize fonts differently).
+
