@@ -103,17 +103,30 @@ function addText(doc, contents, x, y, sizePx, color, bold, centered, name) {
     return layer;
 }
 
-function placePng(doc, path, x, y, name, below) {
-    var src = app.open(new File(path));
-    app.activeDocument = src;
-    var placed = src.activeLayer.duplicate(below || doc,
-        below ? ElementPlacement.PLACEAFTER : ElementPlacement.PLACEATBEGINNING);
-    app.activeDocument = doc;
-    placed.name = name;
-    placed.translate(x, y);
-    app.activeDocument = src;
-    src.close(SaveOptions.DONOTSAVECHANGES);
-    app.activeDocument = doc;
+function placePng(doc, path, x, y, w, h, name) {
+    // Place Embedded: one Action Manager call instead of open/duplicate/close,
+    // so we never switch the active document. Photoshop places at its own
+    // default scale (~500px) and centred, so scale back to the planned size
+    // and move to the planned top-left.
+    var desc = new ActionDescriptor();
+    desc.putPath(stringIDToTypeID("null"), new File(path));
+    desc.putEnumerated(stringIDToTypeID("freeTransformCenterState"),
+                       stringIDToTypeID("quadCenterState"),
+                       stringIDToTypeID("QCSAverage"));
+    executeAction(stringIDToTypeID("placeEvent"), desc, DialogModes.NO);
+    var placed = doc.activeLayer;
+    var b = placed.bounds;
+    var cw = b[2].value - b[0].value, ch = b[3].value - b[1].value;
+    if (w && h && (Math.round(cw) !== w || Math.round(ch) !== h)) {
+        placed.resize(w / cw * 100, h / ch * 100, AnchorPosition.TOPLEFT);
+        b = placed.bounds;
+    }
+    if (x !== null && y !== null) {
+        placed.translate(x - b[0].value, y - b[1].value);
+    }
+    if (name) {
+        placed.name = name;
+    }
     return placed;
 }
 
@@ -128,78 +141,92 @@ var doc = app.documents.add(SPEC.w, SPEC.h, SPEC.dpi, SPEC.doc_name,
     NewDocumentMode.RGB, DocumentFill.WHITE);
 app.activeDocument = doc;
 
-var bgLayer = doc.artLayers.add();
-bgLayer.name = "Background";
-doc.activeLayer = bgLayer;
-fillPoly(doc, rectPts(0, 0, SPEC.w, SPEC.h), rgbColor(SPEC.bg));
-
 var swatchCount = 0, stripCount = 0, textCount = 0, imageCount = 0;
 
-if (SPEC.title) {
-    var t = SPEC.title;
-    addText(doc, t.text, t.cx + ox(t), t.y + oy(t), t.size, t.color, t.bold,
-            true, "Title");
-    textCount++;
-}
+// Everything below runs as ONE history state (doc.suspendHistory at the end),
+// so the user undoes the whole build with a single Cmd/Ctrl+Z and Photoshop
+// stops snapshotting after every swatch/label.
+function buildSheet() {
+    var bgLayer = doc.artLayers.add();
+    bgLayer.name = "Background";
+    doc.activeLayer = bgLayer;
+    fillPoly(doc, rectPts(0, 0, SPEC.w, SPEC.h), rgbColor(SPEC.bg));
 
-// Layers are stacked to match the PNG renderer's draw order. The PNG draws in
-// explicit z-ordered passes - images, then swatches, then captions/labels on
-// top, then strips - so a label can never be covered by an image no matter how
-// the items are dragged. We mirror that order here with the same passes.
-
-// pass 1: swatch fill layers (one layer per palette) with images placed
-// directly underneath them
-for (var pi = 0; pi < SPEC.palettes.length; pi++) {
-    var pal = SPEC.palettes[pi];
-
-    var layer = doc.artLayers.add();
-    layer.name = pal.layer_name;
-    doc.activeLayer = layer;
-    for (var si = 0; si < pal.swatches.length; si++) {
-        var sw = pal.swatches[si];
-        fillPoly(doc, shapePts(sw), rgbColor(sw.color));
-        swatchCount++;
+    if (SPEC.title) {
+        var t = SPEC.title;
+        addText(doc, t.text, t.cx + ox(t), t.y + oy(t), t.size, t.color,
+                t.bold, true, "Title");
+        textCount++;
     }
 
-    // images sit directly under the swatches of their own palette
-    if (pal.images) {
-        for (var ii = 0; ii < pal.images.length; ii++) {
-            var im = pal.images[ii];
-            if (!im.png) { continue; }
-            placePng(doc, im.png, im.x + ox(im), im.y + oy(im), im.name, layer);
-            imageCount++;
+    // Layers are stacked to match the PNG renderer's draw order. The PNG draws
+    // in explicit z-ordered passes - images, then swatches, then captions and
+    // hex labels on top, then strips - so a label can never be covered by an
+    // image no matter how the items are dragged. Same passes here.
+
+    // pass 1: swatch fill layers (one layer per palette) with images placed
+    // directly underneath them. Place the images first, then add the swatch
+    // layer on top and slide each image below it (Place Embedded reuses/removes
+    // an empty layer if one is active, so the swatch layer must come after).
+    for (var pi = 0; pi < SPEC.palettes.length; pi++) {
+        var pal = SPEC.palettes[pi];
+        var placedImages = [];
+        if (pal.images) {
+            for (var ii = 0; ii < pal.images.length; ii++) {
+                var im = pal.images[ii];
+                if (!im.png) { continue; }
+                placedImages.push(placePng(doc, im.png, im.x + ox(im),
+                                           im.y + oy(im), im.w, im.h, im.name));
+                imageCount++;
+            }
+        }
+
+        var layer = doc.artLayers.add();
+        layer.name = pal.layer_name;
+        doc.activeLayer = layer;
+        for (var si = 0; si < pal.swatches.length; si++) {
+            var sw = pal.swatches[si];
+            fillPoly(doc, shapePts(sw), rgbColor(sw.color));
+            swatchCount++;
+        }
+        for (var mi = 0; mi < placedImages.length; mi++) {
+            placedImages[mi].move(layer, ElementPlacement.PLACEAFTER);
+        }
+    }
+
+    // pass 2: captions and hex labels on top of every image and swatch
+    for (var pj = 0; pj < SPEC.palettes.length; pj++) {
+        var pal2 = SPEC.palettes[pj];
+        if (pal2.caption) {
+            addText(doc, pal2.caption.text,
+                    pal2.caption.cx + ox(pal2.caption),
+                    pal2.caption.y + oy(pal2.caption), pal2.caption.size,
+                    pal2.caption.color, pal2.caption.bold, true,
+                    pal2.caption.text);
+            textCount++;
+        }
+        for (var li = 0; li < pal2.swatches.length; li++) {
+            var lw = pal2.swatches[li];
+            if (lw.label_cx === undefined || lw.label_cx === null) { continue; }
+            addText(doc, lw.hex, lw.label_cx + ox(lw), lw.label_y + oy(lw),
+                    lw.label_size, lw.label_color, false, true, lw.hex);
+            textCount++;
+        }
+    }
+
+    // pass 3: gradient strips on top
+    for (var pk = 0; pk < SPEC.palettes.length; pk++) {
+        var pal3 = SPEC.palettes[pk];
+        if (pal3.strip && pal3.strip.png) {
+            placePng(doc, pal3.strip.png, pal3.strip.x + ox(pal3.strip),
+                     pal3.strip.y + oy(pal3.strip),
+                     pal3.strip.w, pal3.strip.h, pal3.strip.name);
+            stripCount++;
         }
     }
 }
 
-// pass 2: captions and hex labels on top of every image and swatch
-for (var pj = 0; pj < SPEC.palettes.length; pj++) {
-    var pal2 = SPEC.palettes[pj];
-    if (pal2.caption) {
-        addText(doc, pal2.caption.text, pal2.caption.cx + ox(pal2.caption),
-                pal2.caption.y + oy(pal2.caption), pal2.caption.size,
-                pal2.caption.color, pal2.caption.bold, true,
-                pal2.caption.text);
-        textCount++;
-    }
-    for (var li = 0; li < pal2.swatches.length; li++) {
-        var lw = pal2.swatches[li];
-        if (lw.label_cx === undefined || lw.label_cx === null) { continue; }
-        addText(doc, lw.hex, lw.label_cx + ox(lw), lw.label_y + oy(lw),
-                lw.label_size, lw.label_color, false, true, lw.hex);
-        textCount++;
-    }
-}
-
-// pass 3: gradient strips on top
-for (var pk = 0; pk < SPEC.palettes.length; pk++) {
-    var pal3 = SPEC.palettes[pk];
-    if (pal3.strip && pal3.strip.png) {
-        placePng(doc, pal3.strip.png, pal3.strip.x + ox(pal3.strip),
-                 pal3.strip.y + oy(pal3.strip), pal3.strip.name);
-        stripCount++;
-    }
-}
+doc.suspendHistory("Color Script", "buildSheet()");
 
 doc.selection.deselect();
 app.preferences.rulerUnits = oldUnits;
