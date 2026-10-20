@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <script src="index.js"></script>
+    <style>
+      html, body { height: 100%; }
+      body {
+        margin: 0;
+        padding: 10px;
+        font-size: 12px;
+      }
+      .row { display: flex; align-items: center; gap: 6px; margin: 6px 0; }
+      .grow { flex: 1 1 auto; }
+      sp-button { width: 100%; }
+      #status {
+        margin-top: 8px;
+        color: var(--uxp-host-text-color-secondary, #9a9a9a);
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+      #status.ok { color: #57c07a; }
+      #status.err { color: #e06a6a; }
+      .muted { color: var(--uxp-host-text-color-secondary, #9a9a9a); }
+      sp-progressbar { margin-top: 8px; }
+    </style>
+  </head>
+  <body>
+    <sp-heading size="S">Color Script</sp-heading>
+    <sp-body class="muted" size="S">
+      Build the palette sheet from a layout file saved by the Color Script app.
+    </sp-body>
+
+    <div class="row">
+      <sp-button id="btnBuild" variant="cta">Build from layout file...</sp-button>
+    </div>
+
+    <sp-progressbar id="progress" hidden></sp-progressbar>
+    <div id="status">No layout loaded yet.</div>
+  </body>
+</html>
