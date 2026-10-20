@@ -44,6 +44,8 @@ glass_panel = tg.glass_panel
 text_shadow = tg.text_shadow
 vgrad = tg.vgrad
 rounded = tg.rounded
+draw_backdrop = tg.draw_backdrop
+title_bar = tg.title_bar
 
 SKY_TOP = tg.SKY_TOP
 WATER = tg.WATER
@@ -64,7 +66,7 @@ class App:
     OPT_PANEL = pygame.Rect(36, 344, 400, 428)
     PREV_PANEL = pygame.Rect(464, 100, 620, 470)
     LIST_AREA = pygame.Rect(52, 148, 368, 132)
-    TITLE_FIELD = pygame.Rect(52, 374, 368, 30)
+    TITLE_FIELD = pygame.Rect(150, 374, 270, 30)
     COUNT_SLIDER = pygame.Rect(52, 428, 300, 14)
     SIZE_SLIDER = pygame.Rect(52, 496, 160, 14)
     GAP_SLIDER = pygame.Rect(232, 496, 160, 14)
@@ -98,6 +100,7 @@ class App:
         self.bg = list(BG_PRESETS[0])
         self.title_text = ""
         self.title_focus = False
+        self.more = False              # advanced options expanded?
 
         self.sheet = None
         self.spec = None
@@ -156,7 +159,12 @@ class App:
             for i, (o, name) in enumerate((("horizontal", "Rows"),
                                            ("vertical", "Columns"),
                                            ("grid", "Grid")))]
-        self.buttons += [
+        self.more_button = Button(
+            (316, 350, 108, 22), "More options", self.toggle_more,
+            base=(120, 170, 200), tfont=font(12, True),
+            selected=lambda: self.more)
+        self.buttons.append(self.more_button)
+        self.more_buttons = [
             Button((52 + i * 118, 598, 110, 28), name,
                    (lambda s=s: self.set_shape(s)),
                    selected=(lambda s=s: self.shape == s),
@@ -179,9 +187,9 @@ class App:
                                  lambda v: self._set_bg(1, v), 0, 255)
         self.blu_slider = Slider(self.BLU_SLIDER, lambda: self.bg[2],
                                  lambda v: self._set_bg(2, v), 0, 255)
-        self.sliders = [self.count_slider, self.size_slider, self.gap_slider,
-                        self.cols_slider, self.red_slider, self.grn_slider,
-                        self.blu_slider]
+        self.sliders = [self.count_slider, self.size_slider]
+        self.more_sliders = [self.gap_slider, self.cols_slider,
+                             self.red_slider, self.grn_slider, self.blu_slider]
         self.combine_check = Checkbox(
             (52, 447, 230, 26), "One palette for all images",
             checked_fn=lambda: self.combine, toggle_fn=self.toggle_combine,
@@ -198,8 +206,9 @@ class App:
             (324, 676, 96, 26), "Images",
             checked_fn=lambda: self.show_images, toggle_fn=self.toggle_images,
             tfont=font(13, True))
-        self.checks = [self.combine_check, self.labels_check, self.grad_check,
-                       self.images_check]
+        self.checks = [self.combine_check]
+        self.more_checks = [self.labels_check, self.grad_check,
+                            self.images_check]
 
     def request_close(self):
         self.running = False
@@ -284,6 +293,9 @@ class App:
 
     def toggle_combine(self):
         self.combine = not self.combine
+
+    def toggle_more(self):
+        self.more = not self.more
 
     def toggle_labels(self):
         self.labels = not self.labels
@@ -643,6 +655,11 @@ class App:
                 s.handle(event)
             for c in self.checks:
                 c.handle(event)
+            if self.more:
+                for s in self.more_sliders:
+                    s.handle(event)
+                for c in self.more_checks:
+                    c.handle(event)
         if event.type == pygame.MOUSEMOTION:
             if self.drag is not None:
                 self._drag_item(event.pos)
@@ -663,6 +680,9 @@ class App:
             self._on_click(event.pos)
         for b in self.buttons:
             b.handle(event)
+        if self.more:
+            for b in self.more_buttons:
+                b.handle(event)
         return True
 
     def _on_click(self, pos):
@@ -708,21 +728,18 @@ class App:
     # ------------------------------------------------------------------ #
     def draw(self):
         screen = self.screen
-        vgrad(screen, (0, 0, *WINDOW), SKY_TOP, WATER)
-        glow = pygame.Surface((420, 420), pygame.SRCALPHA)
-        for i in range(70, 0, -1):
-            a = int(58 * (1 - i / 70.0))
-            pygame.draw.circle(glow, (255, 252, 214, a), (210, 210), 60 + i * 2)
-        screen.blit(glow, (WINDOW[0] - 420, -160))
+        draw_backdrop(screen, self.t)
+        title_bar(screen, "Color Script Studio")
 
-        text_shadow(screen, "Color Script Studio", font(40, True), WHITE,
-                    (44, 26))
         self.draw_files()
         self.draw_options()
         self.draw_preview()
         self.draw_status()
         for b in self.buttons:
             b.draw(screen)
+        if self.more:
+            for b in self.more_buttons:
+                b.draw(screen)
 
     def draw_files(self):
         p = self.FILE_PANEL
@@ -763,13 +780,20 @@ class App:
                 "+%d more" % (len(self.paths) - max_rows), True, INK_SOFT),
                 (area.x + 8, area.bottom - 18))
 
+    def _opt_panel(self):
+        h = 428 if self.more else 300
+        return pygame.Rect(self.OPT_PANEL.x, self.OPT_PANEL.y,
+                           self.OPT_PANEL.width, h)
+
     def draw_options(self):
-        p = self.OPT_PANEL
+        p = self._opt_panel()
         self.screen.blit(glass_panel(p.size), p.topleft)
         text_shadow(self.screen, "Options", font(19, True), INK,
-                    (p.x + 18, p.y + 10), sh=(255, 255, 255))
+                    (p.x + 18, p.y + 4), sh=(255, 255, 255))
+        self.more_button.label = ("Fewer options" if self.more
+                                  else "More options")
         lbl = font(13, True)
-        self.screen.blit(lbl.render("Sheet title", True, INK_SOFT), (52, 356))
+        self.screen.blit(lbl.render("Sheet title", True, INK_SOFT), (54, 381))
 
         fr = self.TITLE_FIELD
         self.screen.blit(rounded(fr.size, 12, (255, 255, 255, 155)), fr)
@@ -795,11 +819,22 @@ class App:
         self.screen.blit(lbl.render("Swatch size", True, INK_SOFT), (52, 480))
         self.screen.blit(font(14, True).render("%d px" % self.size_px, True,
                                                INK), (218, 490))
+
+        self.screen.blit(lbl.render("Orientation", True, INK_SOFT), (52, 524))
+
+        self.count_slider.draw(self.screen)
+        self.size_slider.draw(self.screen)
+
+        if not self.more:
+            self.screen.blit(font(12).render(
+                "Need swatch shape, gap, grid, background or display options?",
+                True, INK_SOFT), (52, 596))
+            return
+
         self.screen.blit(lbl.render("Gap", True, INK_SOFT), (300, 480))
         self.screen.blit(font(14, True).render("%d px" % self.gap_px, True,
                                                INK), (398, 490))
 
-        self.screen.blit(lbl.render("Orientation", True, INK_SOFT), (52, 524))
         self.screen.blit(lbl.render("Swatch shape", True, INK_SOFT), (52, 580))
 
         self.screen.blit(lbl.render("Grid columns", True, INK_SOFT), (52, 634))
@@ -808,17 +843,15 @@ class App:
         self.screen.blit(font(11).render(
             "(grid orientation only)", True, INK_SOFT), (382, 638))
 
-        self.labels_check.draw(self.screen)
-        self.grad_check.draw(self.screen)
-
         self.screen.blit(lbl.render("Background", True, INK_SOFT), (52, 706))
         self.screen.blit(font(11).render("R", True, (176, 56, 56)), (52, 714))
         self.screen.blit(font(11).render("G", True, (60, 150, 90)), (268, 714))
         self.screen.blit(font(11).render("B", True, (60, 110, 200)), (160, 714))
-        for s in (self.count_slider, self.size_slider, self.gap_slider,
-                  self.cols_slider, self.red_slider, self.grn_slider,
-                  self.blu_slider):
+        for s in self.more_sliders:
             s.draw(self.screen)
+        self.labels_check.draw(self.screen)
+        self.grad_check.draw(self.screen)
+        self.images_check.draw(self.screen)
         bp = self.BG_PREVIEW
         self.screen.blit(rounded(bp.size, 8, tuple(self.bg) + (255,)), bp)
         pygame.draw.rect(self.screen, (255, 255, 255, 200), bp, width=2,

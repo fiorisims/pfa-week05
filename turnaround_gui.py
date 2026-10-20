@@ -31,7 +31,15 @@ WINDOW = (1120, 820)
 # palette
 # --------------------------------------------------------------------------- #
 SKY_TOP = (150, 214, 255)
+SKY_HIGH = (128, 200, 250)
+SKY_MID = (196, 234, 255)     # paler band just above the horizon
+HORIZON = (236, 250, 255)
 WATER = (128, 226, 205)
+WATER_DEEP = (92, 196, 208)
+TITLE_TOP = (228, 245, 255)   # glossy window-chrome gradient
+TITLE_BOT = (86, 166, 232)
+TITLE_INK = (250, 254, 255)
+TITLE_INK_DARK = (34, 78, 128)
 INK = (28, 46, 66)
 INK_SOFT = (58, 82, 108)
 WHITE = (255, 255, 255)
@@ -123,47 +131,79 @@ def rounded(size, radius, color):
 
 
 def glass_panel(size, radius=18, tint=(255, 255, 255, 64)):
-    """A frosted glass panel with a glossy top and a bright rim."""
+    """A frosted glass panel: soft shadow, glossy top and a bright rim."""
     w, h = size
     s = pygame.Surface(size, pygame.SRCALPHA)
-    shadow = pygame.Surface((w + 24, h + 24), pygame.SRCALPHA)
-    for i in range(12, 0, -1):
-        a = int(46 * (1 - i / 12.0))
-        pygame.draw.rect(shadow, (18, 54, 78, a),
-                         (12 - i, 12 - i, w + 2 * i, h + 2 * i),
+    # soft outer drop shadow
+    shadow = pygame.Surface((w + 30, h + 30), pygame.SRCALPHA)
+    for i in range(15, 0, -1):
+        a = int(54 * (1 - i / 15.0))
+        pygame.draw.rect(shadow, (12, 46, 74, a),
+                         (15 - i, 13 - i, w + 2 * i, h + 2 * i),
                          border_radius=radius + i)
-    s.blit(shadow, (-12, -12))
-    pygame.draw.rect(s, tint, (0, 0, w, h), border_radius=radius)
-    gloss = pygame.Surface((w - 10, max(6, h // 2)), pygame.SRCALPHA)
-    pygame.draw.rect(gloss, (255, 255, 255, 66),
-                     gloss.get_rect(), border_radius=radius)
-    s.blit(gloss, (5, 4))
-    pygame.draw.rect(s, (255, 255, 255, 175), (0, 0, w, h), width=2,
+    s.blit(shadow, (-15, -13))
+    # frosted body, a touch more opaque near the top (thicker glass look)
+    body = pygame.Surface(size, pygame.SRCALPHA)
+    for y in range(h):
+        k = y / max(1, h - 1)
+        a = int(tint[3] * (1.35 - 0.5 * k))
+        pygame.draw.line(body, (tint[0], tint[1], tint[2], min(255, a)),
+                         (0, y), (w, y))
+    body.blit(rounded(size, radius, (255, 255, 255, 255)), (0, 0),
+              special_flags=pygame.BLEND_RGBA_MULT)
+    s.blit(body, (0, 0))
+    # glossy top reflection (rounded, fading downward)
+    gh = max(8, h // 2)
+    gloss = pygame.Surface((w - 12, gh), pygame.SRCALPHA)
+    for y in range(gh):
+        a = int(96 * (1 - y / float(gh)) ** 1.3)
+        pygame.draw.line(gloss, (255, 255, 255, a), (0, y), (w - 12, y))
+    gloss.blit(rounded((w - 12, gh), radius, (255, 255, 255, 255)), (0, 0),
+               special_flags=pygame.BLEND_RGBA_MULT)
+    s.blit(gloss, (6, 4))
+    # bright rim + faint inner highlight
+    pygame.draw.rect(s, (255, 255, 255, 190), (0, 0, w, h), width=2,
                      border_radius=radius)
+    pygame.draw.rect(s, (255, 255, 255, 90), (3, 3, w - 6, h - 6), width=1,
+                     border_radius=max(2, radius - 2))
     return s
 
 
 def glossy_button(size, radius, base, hover=False, selected=False):
-    """A pill-shaped, jelly-like button with a glass highlight."""
+    """A pill-shaped gel button with a specular highlight and reflection."""
     w, h = size
     s = pygame.Surface(size, pygame.SRCALPHA)
-    top = brighten(base, 0.55 if not hover else 0.72)
-    bot = darken(base, 0.18)
-    grad = pygame.Surface((w, h), pygame.SRCALPHA)
+    top = brighten(base, 0.68 if not hover else 0.85)
+    bot = darken(base, 0.34)
+    grad = pygame.Surface(size, pygame.SRCALPHA)
     for y in range(h):
-        pygame.draw.line(grad, lerp(top, bot, y / max(1, h - 1)),
-                         (0, y), (w, y))
-    grad.blit(rounded((w, h), radius, (255, 255, 255, 255)),
-              (0, 0), special_flags=pygame.BLEND_RGBA_MULT)
+        k = y / max(1, h - 1)
+        col = lerp(top, base, k * 2) if k < 0.5 \
+            else lerp(base, bot, (k - 0.5) * 2)
+        pygame.draw.line(grad, col, (0, y), (w, y))
+    grad.blit(rounded(size, radius, (255, 255, 255, 255)), (0, 0),
+              special_flags=pygame.BLEND_RGBA_MULT)
     s.blit(grad, (0, 0))
-    hl = pygame.Surface((w - 8, max(4, h // 2 - 2)), pygame.SRCALPHA)
-    pygame.draw.rect(hl, (255, 255, 255, 105 if hover else 85),
-                     hl.get_rect(), border_radius=radius)
-    s.blit(hl, (4, 4))
-    rim = (255, 255, 255, 220) if (hover or selected) else (255, 255, 255, 150)
+    # glass highlight over the upper ~45%
+    hh = max(4, int(h * 0.45))
+    hl = pygame.Surface((w - 8, hh), pygame.SRCALPHA)
+    for y in range(hh):
+        a = int((135 if hover else 105) * (1 - y / float(hh)) ** 1.2)
+        pygame.draw.line(hl, (255, 255, 255, a), (0, y), (w - 8, y))
+    hl.blit(rounded((w - 8, hh), radius, (255, 255, 255, 255)), (0, 0),
+            special_flags=pygame.BLEND_RGBA_MULT)
+    s.blit(hl, (4, 3))
+    # crisp specular line + bottom reflection
+    pygame.draw.line(s, (255, 255, 255, 150), (7, 3), (w - 8, 3), 1)
+    rh = max(3, h // 5)
+    refl = pygame.Surface((w - 12, rh), pygame.SRCALPHA)
+    pygame.draw.rect(refl, (255, 255, 255, 72), refl.get_rect(),
+                     border_radius=max(3, radius - 4))
+    s.blit(refl, (6, h - rh - 3))
+    rim = (255, 255, 255, 235) if (hover or selected) else (255, 255, 255, 160)
     pygame.draw.rect(s, rim, (0, 0, w, h), width=2, border_radius=radius)
     if selected:
-        pygame.draw.rect(s, (255, 255, 255, 130), (2, 2, w - 4, h - 4),
+        pygame.draw.rect(s, (255, 255, 255, 140), (2, 2, w - 4, h - 4),
                          width=1, border_radius=radius)
     return s
 
@@ -198,6 +238,163 @@ def draw_loading_spinner(surf, center, phase, radius=30, dots=8,
         col = lerp(color, accent, lit)
         r = int(round(3.0 + 4.0 * lit))
         pygame.draw.circle(surf, col, (int(round(x)), int(round(y))), r)
+
+
+# --------------------------------------------------------------------------- #
+# "Frutiger Aero" scenery: sky-over-water backdrop + glossy window chrome
+# --------------------------------------------------------------------------- #
+_backdrop_base = {}
+
+
+def _wave_path(w, y0, amp, wl, phase, n=200):
+    """Sample an abstract undulating wave crest across the full width.
+
+    A primary sine plus a weaker, faster harmonic keeps each wave organic
+    rather than perfectly periodic. The path runs past both edges so the
+    bands bleed off-screen instead of ending in mid-air.
+    """
+    pts = []
+    for i in range(n + 1):
+        x = -80.0 + (w + 160.0) * i / float(n)
+        u = x / float(wl) + phase
+        y = (y0 + amp * math.sin(2.0 * math.pi * u)
+                 + amp * 0.30 * math.sin(2.0 * math.pi * u * 1.65 + 1.05))
+        pts.append((x, y))
+    return pts
+
+
+def _wave_band(dest, path, thick, top, bottom, a_top, a_bot,
+               gloss=(255, 255, 255, 110), gloss_w=2):
+    """A translucent wave band with a glossy crest highlight.
+
+    ``path`` is the crest curve and the band hangs ``thick`` below it. The
+    colour gradient and the alpha ramp are scoped to the band's own vertical
+    extent, so each wave reads as a glossy ribbon (brightest near the highest
+    crest, fading out toward the lowest trough) rather than a flat slab.
+    """
+    w, h = dest.get_size()
+    y0 = min(p[1] for p in path)
+    y1 = max(p[1] for p in path) + thick
+    span = max(1.0, y1 - y0)
+    mask = pygame.Surface((w, h), pygame.SRCALPHA)
+    pygame.draw.polygon(mask, (255, 255, 255, 255),
+                        list(path) + [(x, y + thick) for x, y in path][::-1])
+    ramp = pygame.Surface((w, h), pygame.SRCALPHA)
+    for yy in range(int(y0), int(y1) + 1):
+        k = (yy - y0) / span
+        a = int(a_top + (a_bot - a_top) * max(0.0, min(1.0, k)))
+        pygame.draw.line(ramp, (255, 255, 255, max(0, min(255, a))),
+                         (0, yy), (w, yy))
+    mask.blit(ramp, (0, 0), special_flags=pygame.BLEND_RGBA_MULT)
+    grad = pygame.Surface((w, h), pygame.SRCALPHA)
+    vgrad(grad, (0, int(y0), w, int(span) + 2), top, bottom)
+    grad.blit(mask, (0, 0), special_flags=pygame.BLEND_RGBA_MULT)
+    pygame.draw.lines(grad, gloss, False, list(path), gloss_w)
+    dest.blit(grad, (0, 0))
+
+
+def _paint_waves(dest):
+    """Early-2000s abstract waves: layered translucent ribbons, glossy crests."""
+    w, h = dest.get_size()
+    fx = pygame.Surface((w, h), pygame.SRCALPHA)
+    # crest y, amplitude, wavelength, phase, thickness, top, bottom, a_top, a_bot
+    waves = [
+        (0.24, 0.040, 1.40, 0.90, 58, (255, 255, 255), (150, 218, 248),
+         128, 12),
+        (0.30, 0.052, 1.05, 0.05, 118, (184, 246, 255), (26, 152, 214),
+         162, 18),
+        (0.42, 0.044, 0.86, 0.47, 96, (170, 250, 216), (28, 180, 142),
+         148, 16),
+        (0.56, 0.050, 1.22, 0.83, 88, (214, 198, 255), (114, 98, 216),
+         126, 14),
+        (0.68, 0.036, 0.74, 0.28, 70, (200, 252, 232), (42, 198, 172),
+         112, 12),
+    ]
+    for y0, amp, wl, ph, th, top, bot, a_t, a_b in waves:
+        _wave_band(fx, _wave_path(w, h * y0, h * amp, w * wl, ph),
+                   th, top, bot, a_t, a_b)
+    # bright crest highlights riding the same waves
+    for y0, amp, wl, ph, a in ((0.30, 0.052, 1.05, 0.05, 190),
+                               (0.42, 0.044, 0.86, 0.47, 165),
+                               (0.56, 0.050, 1.22, 0.83, 145),
+                               (0.68, 0.036, 0.74, 0.28, 135)):
+        pygame.draw.lines(fx, (255, 255, 255, a), False,
+                          _wave_path(w, h * y0, h * amp, w * wl, ph), 3)
+    dest.blit(fx, (0, 0))
+
+
+def draw_backdrop(surf, t=0.0):
+    """Sky-over-water base with layered early-2000s abstract waves.
+
+    The whole backdrop is static and cached per size; ``t`` is accepted for
+    API compatibility only.
+    """
+    w, h = surf.get_size()
+    base = _backdrop_base.get((w, h))
+    if base is None:
+        base = pygame.Surface((w, h)).convert()
+        horizon = int(h * 0.44)
+        vgrad(base, (0, 0, w, int(h * 0.18)), SKY_HIGH, SKY_TOP)
+        vgrad(base, (0, 0, w, horizon + 1), SKY_TOP, SKY_MID)
+        vgrad(base, (0, horizon, w, h - horizon), (150, 232, 222), WATER_DEEP)
+        glow = pygame.Surface((w, 52), pygame.SRCALPHA)
+        for i in range(52):
+            a = int(130 * (1 - abs(i - 26) / 26.0) ** 1.5)
+            pygame.draw.line(glow, (HORIZON[0], HORIZON[1], HORIZON[2], a),
+                             (0, i), (w, i))
+        base.blit(glow, (0, horizon - 26))
+        _paint_waves(base)
+        _backdrop_base[(w, h)] = base
+    surf.blit(base, (0, 0))
+
+
+def _app_icon(surf, pos):
+    """A glossy glass app icon tile with four palette dots."""
+    s = pygame.Surface((44, 44), pygame.SRCALPHA)
+    pygame.draw.rect(s, (8, 52, 90, 90), (0, 3, 44, 44), border_radius=12)
+    vgrad(s, (0, 0, 44, 44), brighten(AQUA, 0.62), AQUA_DEEP)
+    s.blit(rounded((44, 44), 12, (255, 255, 255, 255)), (0, 0),
+           special_flags=pygame.BLEND_RGBA_MULT)
+    hl = pygame.Surface((36, 20), pygame.SRCALPHA)
+    pygame.draw.rect(hl, (255, 255, 255, 150), hl.get_rect(), border_radius=10)
+    s.blit(hl, (4, 3))
+    for i, col in enumerate(((255, 96, 96), (255, 196, 60), (86, 210, 130),
+                             (120, 176, 255))):
+        pygame.draw.circle(s, col, (13 + (i % 2) * 17, 14 + (i // 2) * 15), 5)
+    pygame.draw.rect(s, (255, 255, 255, 220), (0, 0, 44, 44), width=2,
+                     border_radius=12)
+    surf.blit(s, pos)
+
+
+def title_bar(surf, title, icon=True):
+    """Draw a glossy early-2000s window title bar across the top.
+
+    Returns the bar height so callers can keep their panels clear of it.
+    """
+    w = surf.get_width()
+    h = 70
+    bar = pygame.Surface((w, h), pygame.SRCALPHA)
+    for i in range(10, 0, -1):                   # drop shadow below the bar
+        a = int(60 * (1 - i / 10.0))
+        pygame.draw.rect(bar, (10, 40, 70, a), (0, h, w, i))
+    vgrad(bar, (0, 0, w, h), TITLE_TOP, TITLE_BOT)
+    sheen = pygame.Surface((w, h // 2), pygame.SRCALPHA)
+    for y in range(h // 2):                      # glass sheen (upper half)
+        a = int(150 * (1 - y / (h / 2.0)) ** 1.5)
+        pygame.draw.line(sheen, (255, 255, 255, a), (0, y), (w, y))
+    bar.blit(sheen, (0, 0))
+    pygame.draw.line(bar, (255, 255, 255, 240), (0, 0), (w, 0), 2)
+    pygame.draw.line(bar, (255, 255, 255, 90), (0, 2), (w, 2), 1)
+    pygame.draw.rect(bar, (52, 108, 158, 220), (0, h - 2, w, 2))
+    surf.blit(bar, (0, 0))
+    tx = 30
+    if icon:
+        _app_icon(surf, (22, 20))
+        tx = 76
+    surf.blit(font(30, True).render(title, True, TITLE_INK_DARK),
+              (tx + 1, 21))
+    surf.blit(font(30, True).render(title, True, TITLE_INK), (tx, 20))
+    return h
 
 
 class Button:
@@ -273,16 +470,40 @@ class Slider:
 
     def draw(self, surf):
         r = self.rect
-        tr = pygame.Rect(r.x, r.centery - 3, r.width, 6)
-        pygame.draw.rect(surf, (255, 255, 255, 170), tr, border_radius=3)
+        pad = 12
+        s = pygame.Surface((r.width, r.height + pad * 2), pygame.SRCALPHA)
+        cy = (r.height + pad * 2) // 2
+        # inset chrome groove
+        groove = pygame.Rect(0, cy - 6, r.width, 12)
+        pygame.draw.rect(s, (255, 255, 255, 150), groove, border_radius=6)
+        pygame.draw.rect(s, (44, 84, 120, 90), groove, width=1, border_radius=6)
+        pygame.draw.line(s, (30, 66, 100, 130), (groove.x + 4, groove.y + 1),
+                         (groove.right - 4, groove.y + 1))
         kx = self._knob_x()
+        kx = None if kx is None else kx - r.x
         if kx is None:
-            pygame.draw.rect(surf, (176, 186, 196, 190), tr, border_radius=3)
-            return
-        pygame.draw.rect(surf, (0, 150, 205, 255),
-                         (tr.x, tr.y, kx - tr.x, tr.height), border_radius=3)
-        pygame.draw.circle(surf, (255, 255, 255, 255), (kx, r.centery), 9)
-        pygame.draw.circle(surf, (0, 120, 178, 255), (kx, r.centery), 9, 2)
+            pygame.draw.rect(s, (176, 186, 196, 205), groove, border_radius=6)
+        else:
+            if kx > 3:
+                fill = pygame.Surface((kx, groove.height), pygame.SRCALPHA)
+                vgrad(fill, (0, 0, kx, groove.height), (140, 226, 255),
+                      AQUA_DEEP)
+                fill.blit(rounded((kx, groove.height), 6,
+                                  (255, 255, 255, 255)), (0, 0),
+                          special_flags=pygame.BLEND_RGBA_MULT)
+                s.blit(fill, groove.topleft)
+            # glossy gel knob
+            kr = 10
+            c = (kx, cy)
+            pygame.draw.circle(s, (8, 60, 96, 80), (c[0] + 1, c[1] + 2), kr)
+            pygame.draw.circle(s, (196, 226, 244), c, kr)
+            pygame.draw.circle(s, WHITE, (c[0], c[1] - 1), kr - 1)
+            pygame.draw.circle(s, AQUA_DEEP, c, kr, 2)
+            hl = pygame.Surface((kr * 2 + 2, kr * 2 + 2), pygame.SRCALPHA)
+            pygame.draw.ellipse(hl, (255, 255, 255, 220),
+                                (kr - 2, 1, (kr - 2) * 2, kr - 2))
+            s.blit(hl, (c[0] - kr, c[1] - kr))
+        surf.blit(s, (r.x, r.y - pad))
 
 
 class Scrollbar:
@@ -366,11 +587,17 @@ class Scrollbar:
         pygame.draw.rect(surf, (255, 255, 255, 130), r, border_radius=6)
         thumb, active = self._thumb_rect()
         if active:
-            col = (0, 150, 205) if (self.hover or self.dragging) \
+            base = (0, 150, 205) if (self.hover or self.dragging) \
                 else (0, 176, 224)
         else:
-            col = (204, 211, 217)         # faint = nothing to scroll
-        pygame.draw.rect(surf, col, thumb, border_radius=6)
+            base = (204, 211, 217)         # faint = nothing to scroll
+        ts = pygame.Surface(thumb.size, pygame.SRCALPHA)
+        vgrad(ts, (0, 0, *thumb.size), brighten(base, 0.5), darken(base, 0.2))
+        ts.blit(rounded(thumb.size, 6, (255, 255, 255, 255)), (0, 0),
+                special_flags=pygame.BLEND_RGBA_MULT)
+        pygame.draw.line(ts, (255, 255, 255, 150), (3, 1),
+                         (thumb.width - 3, 1))
+        surf.blit(ts, thumb.topleft)
 
 
 class Checkbox:
@@ -403,21 +630,37 @@ class Checkbox:
     def draw(self, surf):
         w, h = self.rect.size
         s = pygame.Surface((w, h), pygame.SRCALPHA)
-        tint = (255, 255, 255, 150 if self.hover else 105)
-        pygame.draw.rect(s, tint, (0, 0, w, h), border_radius=13)
-        pygame.draw.rect(s, (255, 255, 255, 190), (0, 0, w, h), width=2,
+        pygame.draw.rect(s, (255, 255, 255, 165 if self.hover else 120),
+                         (0, 0, w, h), border_radius=13)
+        gloss = pygame.Surface((w - 6, h // 2), pygame.SRCALPHA)
+        pygame.draw.rect(gloss, (255, 255, 255, 80), gloss.get_rect(),
+                         border_radius=13)
+        s.blit(gloss, (3, 2))
+        pygame.draw.rect(s, (255, 255, 255, 200), (0, 0, w, h), width=2,
                          border_radius=13)
         box = pygame.Rect(12, (h - self.BOX) // 2, self.BOX, self.BOX)
         checked = bool(self.checked_fn())
-        pygame.draw.rect(s, (255, 255, 255, 235), box, border_radius=6)
-        pygame.draw.rect(s, (150, 170, 190) if not checked else AQUA_DEEP,
-                         box, width=2, border_radius=6)
+        pygame.draw.rect(s, (255, 255, 255, 240), box, border_radius=6)
+        boxgl = pygame.Surface((box.width - 4, box.height // 2),
+                               pygame.SRCALPHA)
+        pygame.draw.rect(boxgl, (255, 255, 255, 130), boxgl.get_rect(),
+                         border_radius=5)
+        s.blit(boxgl, (box.x + 2, box.y + 2))
         if checked:
-            pygame.draw.rect(s, AQUA, box.inflate(-6, -6), border_radius=4)
+            pygame.draw.rect(s, AQUA_DEEP, box, width=2, border_radius=6)
+            inner = box.inflate(-6, -6)
+            pygame.draw.rect(s, AQUA, inner, border_radius=4)
+            igl = pygame.Surface((inner.width, inner.height // 2),
+                                 pygame.SRCALPHA)
+            pygame.draw.rect(igl, (255, 255, 255, 120), igl.get_rect(),
+                             border_radius=4)
+            s.blit(igl, inner.topleft)
             cx, cy = box.center
             pygame.draw.lines(s, (255, 255, 255), False,
                               [(cx - 6, cy), (cx - 2, cy + 5),
                                (cx + 7, cy - 5)], 3)
+        else:
+            pygame.draw.rect(s, (150, 170, 190), box, width=2, border_radius=6)
         lab = self.tfont.render(self.label, True, INK)
         s.blit(lab, (box.right + 10, (h - lab.get_height()) // 2))
         surf.blit(s, self.rect.topleft)
@@ -431,7 +674,7 @@ class App:
     OPT_PANEL = pygame.Rect(36, 472, 448, 300)
     PREV_PANEL = pygame.Rect(512, 100, 572, 366)
     LIST_AREA = pygame.Rect(52, 156, 416, 232)
-    TITLE_FIELD = pygame.Rect(56, 506, 408, 32)
+    TITLE_FIELD = pygame.Rect(156, 506, 308, 32)
     SCALE_SLIDER = pygame.Rect(56, 748, 380, 14)
     PREVIEW_FRAME = pygame.Rect(530, 148, 536, 300)
     HSCROLL = pygame.Rect(530, 452, 536, 12)
@@ -1271,14 +1514,9 @@ class App:
     # ------------------------------------------------------------------ #
     def draw(self):
         screen = self.screen
-        vgrad(screen, (0, 0, *WINDOW), SKY_TOP, WATER)
-        glow = pygame.Surface((420, 420), pygame.SRCALPHA)
-        for i in range(70, 0, -1):
-            a = int(58 * (1 - i / 70.0))
-            pygame.draw.circle(glow, (255, 252, 214, a), (210, 210), 60 + i * 2)
-        screen.blit(glow, (WINDOW[0] - 420, -160))
+        draw_backdrop(screen, self.t)
+        title_bar(screen, "Turnaround Studio")
 
-        self.draw_header()
         self.draw_files()
         self.draw_options()
         self.draw_preview()
@@ -1287,10 +1525,6 @@ class App:
         for b in self.buttons:
             b.draw(screen)
         self.flatten_check.draw(screen)
-
-    def draw_header(self):
-        text_shadow(self.screen, "Turnaround Studio", font(40, True), WHITE,
-                    (44, 26))
 
     def draw_files(self):
         p = self.FILE_PANEL
@@ -1340,10 +1574,10 @@ class App:
         p = self.OPT_PANEL
         self.screen.blit(glass_panel(p.size), p.topleft)
         text_shadow(self.screen, "Options", font(19, True), INK,
-                    (p.x + 18, p.y + 12), sh=(255, 255, 255))
+                    (p.x + 18, p.y + 6), sh=(255, 255, 255))
         lbl = font(13, True)
         self.screen.blit(lbl.render("Sheet title", True, INK_SOFT),
-                         (60, 486))
+                         (60, 514))
         self.screen.blit(lbl.render("Rotation views", True, INK_SOFT),
                          (60, 552))
         self.screen.blit(lbl.render("Orientation", True, INK_SOFT),
