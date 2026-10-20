@@ -318,6 +318,79 @@ def test_items(tmp):
     check("Image 1 -" in jsx, "JSX names the image layers")
 
 
+def test_text(tmp):
+    red = make_red(tmp / "tx_red.png", 40)
+    blue = make_blue(tmp / "tx_blue.png", 40)
+    sheet, spec, _pal = ps.build_sheet([str(red), str(blue)], swatches=3,
+                                       font="Serif",
+                                       texts=[{"text": "Free", "cx": 120,
+                                               "y": 60, "size": 22,
+                                               "color": [255, 255, 255]}])
+    check(spec["font"] == "Serif", "plan_layout records the sheet font")
+    check(all(p["caption"]["font"] == "Serif" for p in spec["palettes"]),
+          "captions inherit the sheet font")
+    check(all(p["swatches"][0]["label_font"] == "Serif"
+              for p in spec["palettes"]),
+          "hex labels inherit the sheet font")
+    check(len(spec["texts"]) == 1 and spec["texts"][0]["id"] == "txt:0"
+          and spec["texts"][0]["font"] == "Serif",
+          "free text boxes land in the spec")
+
+    ti = ps.text_items(spec)
+    kinds = {t["kind"] for t in ti}
+    check({"caption", "label", "text"} <= kinds,
+          "text_items lists captions, labels and free boxes")
+    check(all("field" in t and "el" in t for t in ti),
+          "text items carry an editable field")
+
+    tid = spec["texts"][0]["id"]
+    label_id = next(t["id"] for t in ti if t["kind"] == "label")
+    check(ps.set_text(spec, tid, "Changed")
+          and spec["texts"][0]["text"] == "Changed",
+          "set_text edits a free box")
+    check(ps.set_text(spec, "cap:0", "CAP")
+          and next(t for t in ps.text_items(spec)
+                   if t["id"] == "cap:0")["text"] == "CAP",
+          "set_text edits a caption")
+    lab = next(t for t in ps.text_items(spec) if t["id"] == label_id)
+    check(ps.set_text(spec, label_id, "#ABCDEF")
+          and lab["el"]["hex"] == "#ABCDEF",
+          "set_text edits a hex label (its hex field)")
+
+    check(ps.set_text_size(spec, tid, 40) and ps.text_size(spec, tid) == 40,
+          "set_text_size changes a box size")
+    ps.set_text_size(spec, label_id, 20)
+    check(ps.text_size(spec, label_id) == 20,
+          "set_text_size changes a label size")
+    check(ps.set_text_font(spec, tid, "Mono")
+          and spec["texts"][0]["font"] == "Mono",
+          "set_text_font changes a box face")
+    ps.set_text_font(spec, label_id, "Mono")
+    check(ps.text_size(spec, label_id) == 20, "label keeps its size")
+    check(ps.set_text_bold(spec, tid) and spec["texts"][0]["bold"],
+          "set_text_bold toggles bold")
+    check(ps.remove_text(spec, tid) and spec["texts"] == [],
+          "remove_text drops a free box")
+
+    sheet2, spec2, _p = ps.build_sheet([str(red)], swatches=3, font="Mono",
+                                       title="Hi",
+                                       texts=[{"text": "Note", "cx": 80,
+                                               "y": 50, "size": 18,
+                                               "color": [255, 255, 255]}])
+    jsx = ps.build_palette_jsx(spec2)
+    check('"font": "Mono"' in jsx and "SPEC.texts" in jsx
+          and "faceName" in jsx,
+          "JSX embeds the font and renders free text boxes")
+    check(ps.font(20, face="Serif") is not None
+          and ps.resolve_face("Nope") == "Nope",
+          "font() accepts a face key or candidate string")
+
+    spec2["texts"][0]["dx"] = 12
+    frame = ps.render_spec(spec2)
+    check(frame.get_size() == (spec2["w"], spec2["h"]),
+          "render_spec draws free text boxes")
+
+
 def test_build(tmp):
     red = make_red(tmp / "red.png")
     blue = make_blue(tmp / "blue.png", 64)
@@ -448,7 +521,9 @@ def test_live(tmp):
     blue = make_blue(tmp / "live_blue.png", 40)
     _surf, spec, _pal = ps.build_sheet(
         [str(red), str(blue)], swatches=2, swatch=80, gap=24, shape="square",
-        labels=True, gradients=True, bg=(255, 255, 255), title="Live test")
+        labels=True, gradients=True, bg=(255, 255, 255), title="Live test",
+        font="Mono", texts=[{"text": "Free text", "cx": 60, "y": 90,
+                             "size": 20, "color": [255, 255, 255]}])
 
     try:
         aco_out = tmp / "live_auto.aco"
@@ -494,6 +569,7 @@ def test_live(tmp):
         check("Gradient 1" in res and "Palette 1" in res,
               "layers are named after the palettes/gradients")
         check("Image 1 -" in res, "the source images are placed as layers")
+        check("Free text" in res, "the free text box is a text layer")
     finally:
         try:
             cleanup = ('app.displayDialogs = DialogModes.NO;'
@@ -600,6 +676,69 @@ def test_gui(tmp):
     app._zoom(1.5, app.PREVIEW_FRAME.center)
     check(app.zoom is not None, "GUI zooms the preview")
 
+    # --- text boxes: add / select / type / font / size / bold / delete
+    app.add_text()
+    check(len(app.spec["texts"]) == 1 and app.selected_text is not None,
+          "GUI adds a free text box and selects it")
+    tid = app.spec["texts"][0]["id"]
+
+    def key(ch):
+        app.handle(pygame.event.Event(pygame.KEYDOWN, key=ord(ch.lower())
+                                      if ch.isalpha() else 0, unicode=ch))
+
+    app.text_edit = True
+    key("A")
+    key("b")
+    check(app.spec["texts"][0]["text"].endswith("Ab"),
+          "GUI types into the selected text box")
+
+    # click a caption on the preview -> selects + edits it (move the free box
+    # out of the way first so the topmost item under the cursor is the caption)
+    ps.set_offset(app.spec, tid, 300, 260)
+    app.zoom = None
+    app.pan = [0.0, 0.0]
+    app._make_preview()
+    cap = next(it for it in ps.spec_items(app.spec) if it["kind"] == "caption")
+    cr = app.item_rect_on_screen(cap)
+    app.handle(pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=1,
+                                  pos=cr.center))
+    check(app.selected_text == cap["id"] and app.text_edit,
+          "GUI selects a caption on click for editing")
+    app.handle(pygame.event.Event(pygame.MOUSEBUTTONUP, button=1,
+                                  pos=cr.center))
+
+    app.set_font("Mono")
+    check(app._current_font_key() == "Mono"
+          and ps.find_text_item(app.spec, app.selected_text)["el"].get("font")
+          == "Mono",
+          "GUI font picker changes the selected caption face")
+    app.text_size_slider.set_fn(34)
+    check(ps.text_size(app.spec, app.selected_text) == 34,
+          "GUI size slider changes the selected text size")
+    app.toggle_text_bold()
+    check(ps.find_text_item(app.spec, app.selected_text)["el"]["bold"] in
+          (True, False), "GUI bold toggle edits the selected text")
+    check(app.options()["font"] == "Mono",
+          "GUI options carry the chosen font into build_sheet")
+
+    # a free box survives a rebuild (words + font)
+    app.selected_text = tid
+    app.spec["texts"][0]["text"] = "Persist me"
+    app.set_font("Serif")
+    app.build()
+    deadline = time.time() + 30
+    while app.busy and time.time() < deadline:
+        app._poll_task()
+        time.sleep(0.01)
+    b0 = app.spec["texts"][0]
+    check(b0["text"] == "Persist me" and b0["font"] == "Serif",
+          "GUI keeps a free text box's words and font across a rebuild")
+
+    app.selected_text = b0["id"]
+    app.delete_text()
+    check(app.spec["texts"] == [],
+          "GUI deletes the selected free text box")
+
     check(app.more is False, "GUI hides the advanced options by default")
 
     def click(rect):
@@ -655,6 +794,7 @@ def main(argv=None):
         test_layout()
         test_label_on_top(tmp)
         test_items(tmp)
+        test_text(tmp)
         test_build(tmp)
         test_aco(tmp)
         test_cli(tmp)

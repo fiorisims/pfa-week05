@@ -39,6 +39,11 @@ DOC_NAME = ps.DOC_NAME
 LOADING_DELAY = 5.0
 SPIN_SPEED = 4.0
 
+FONT_ORDER = ps.FONT_ORDER          # Sans / Serif / Mono
+FONT_FACES = ps.FONT_FACES
+TEXT_MIN_IN = ps.TEXT_SIZE_MIN      # size controls (fractions of a base size)
+TEXT_MAX_IN = ps.TEXT_SIZE_MAX
+
 font = tg.font
 glass_panel = tg.glass_panel
 text_shadow = tg.text_shadow
@@ -77,6 +82,8 @@ class App:
     BG_PREVIEW = pygame.Rect(384, 718, 40, 44)
     PREVIEW_FRAME = pygame.Rect(482, 146, 584, 384)
     STATUS_PANEL = pygame.Rect(464, 700, 620, 64)
+    TEXT_BAR = pygame.Rect(482, 534, 584, 30)
+    TEXT_SIZE_SLIDER = pygame.Rect(736, 542, 130, 14)
 
     def __init__(self):
         pygame.init()
@@ -101,6 +108,14 @@ class App:
         self.title_text = ""
         self.title_focus = False
         self.more = False              # advanced options expanded?
+
+        # text editing: every title / caption / hex label / free box is
+        # click-to-select then type-to-edit (see palette_sheet.text_items)
+        self.selected_text = None      # an item id (or None)
+        self.text_edit = False         # typing into the selected item?
+        self.font_key = FONT_ORDER[0]  # face new text uses until one is selected
+        self.text_drag = None          # {"id", "grab"} while dragging a text box
+        self.texts = []                # free text boxes (mirrored into the spec)
 
         self.sheet = None
         self.spec = None
@@ -210,6 +225,26 @@ class App:
         self.more_checks = [self.labels_check, self.grad_check,
                             self.images_check]
 
+        # --- text box bar: add / delete / bold, a font picker and a size slider
+        self.text_buttons = [
+            Button((482, 536, 90, 28), "Add Text", self.add_text,
+                   base=AQUA, tfont=font(14, True)),
+            Button((576, 536, 96, 28), "Delete box", self.delete_text,
+                   base=(150, 155, 165), tfont=font(14, True)),
+            Button((676, 536, 30, 28), "B", self.toggle_text_bold,
+                   selected=lambda: self._selected_text_bold(),
+                   tfont=font(15, True)),
+        ]
+        self.text_buttons += [
+            Button((878 + i * 62, 536, 58, 28), name,
+                   (lambda k=name: self.set_font(k)),
+                   selected=(lambda k=name: self._current_font_key() == k),
+                   tfont=font(13, True))
+            for i, name in enumerate(FONT_ORDER)]
+        self.text_size_slider = Slider(
+            self.TEXT_SIZE_SLIDER, self._selected_text_size,
+            self._set_selected_text_size, 8, 90)
+
     def request_close(self):
         self.running = False
 
@@ -307,6 +342,8 @@ class App:
         self.show_images = not self.show_images
 
     def options(self):
+        texts = (self.spec.get("texts", []) if self.spec is not None
+                 else self.texts)
         return {
             "swatches": self.count, "shared": self.combine,
             "shape": self.shape, "orientation": self.orientation,
@@ -314,8 +351,126 @@ class App:
             "labels": self.labels, "gradients": self.gradients,
             "captions": True, "bg": tuple(self.bg), "title": self.title_text,
             "dpi": 150, "doc_name": DOC_NAME,
-            "show_images": self.show_images,
+            "show_images": self.show_images, "font": self.font_key,
+            "texts": [dict(t) for t in texts],
         }
+
+    # ------------------------------------------------------------------ #
+    # text boxes: every title / caption / hex label / free box is editable
+    # ------------------------------------------------------------------ #
+    def _selected_text_bold(self):
+        it = self._find_text(self.selected_text)
+        return bool(it and it["el"].get("bold"))
+
+    def _current_font_key(self):
+        """The face of the selected item, else the face new boxes will use."""
+        it = self._find_text(self.selected_text)
+        if it is not None:
+            el = it["el"]
+            face = el.get("label_font") if it["kind"] == "label" else el.get("font")
+            if face in FONT_FACES:
+                return face
+        return self.font_key
+
+    def _selected_text_size(self):
+        if self.spec is None or self.selected_text is None:
+            return None
+        return ps.text_size(self.spec, self.selected_text)
+
+    def _set_selected_text_size(self, value):
+        if self.spec is None or self.selected_text is None:
+            return
+        ps.set_text_size(self.spec, self.selected_text, value)
+        self._refresh_sheet()
+
+    def _find_text(self, item_id):
+        if self.spec is None or item_id is None:
+            return None
+        return ps.find_text_item(self.spec, item_id)
+
+    def add_text(self):
+        self.title_focus = False
+        self.text_edit = False
+        if self.spec is None:
+            self.status, self.status_ok = (
+                "Build the sheet first, then add text boxes.", False)
+            return
+        el = ps.add_text(self.spec, "Text", size=ps.TITLE_SIZE,
+                         font=self.font_key)
+        self.selected_text = el["id"]
+        self._refresh_sheet()
+        self.status, self.status_ok = (
+            "Text box added - drag it on the preview, click and type to edit.",
+            True)
+
+    def delete_text(self):
+        self.text_edit = False
+        if self.spec is None or self.selected_text is None:
+            self.status, self.status_ok = "No text box selected.", False
+            return
+        kind = (self._find_text(self.selected_text) or {}).get("kind")
+        if kind in ("title", "caption", "label"):
+            self.status, self.status_ok = (
+                "Only free text boxes can be deleted (this is a %s)."
+                % kind, False)
+            return
+        ps.remove_text(self.spec, self.selected_text)
+        self.selected_text = None
+        self._refresh_sheet()
+        self.status, self.status_ok = "Text box removed.", True
+
+    def toggle_text_bold(self):
+        if self.spec is None or self.selected_text is None:
+            self.status, self.status_ok = "Select a text box first.", False
+            return
+        ps.set_text_bold(self.spec, self.selected_text)
+        self._refresh_sheet()
+
+    def set_font(self, key):
+        if key not in FONT_FACES:
+            return
+        self.font_key = key
+        if self.spec is not None and self.selected_text is not None:
+            ps.set_text_font(self.spec, self.selected_text, key)
+            self._refresh_sheet()
+            self.status, self.status_ok = ("Selected text font: %s." % key, True)
+        else:
+            self.status, self.status_ok = (
+                "New text boxes will use %s." % key, True)
+
+    def _type_text(self, ch):
+        """Append/backspace on the selected text item while editing."""
+        if self.spec is None or self.selected_text is None:
+            return False
+        it = self._find_text(self.selected_text)
+        if it is None:
+            return False
+        if ch == "\b":
+            new = it["text"][:-1]
+        elif ch and ch.isprintable():
+            new = (it["text"] + ch)[:64]
+        else:
+            return False
+        ps.set_text(self.spec, self.selected_text, new)
+        if it["kind"] == "title":
+            self.title_text = new          # keep the header field in sync
+        self._refresh_sheet()
+        return True
+
+    def _text_at(self, pos):
+        """id of the text item under a screen point (or None)."""
+        if self.spec is None:
+            return None
+        px, py = self.sheet_pos(pos)
+        pad = 6.0 / max(0.01, self._pv_scale)
+        hit = None
+        for it in ps.spec_items(self.spec):
+            if it["kind"] not in ("title", "caption", "label", "text"):
+                continue
+            if (it["x"] - pad <= px <= it["x"] + it["w"] + pad
+                    and it["y"] - pad <= py <= it["y"] + it["h"] + pad):
+                hit = it["id"]
+        return hit
 
     # ------------------------------------------------------------------ #
     # build / send tasks (one worker at a time, polled by the main loop)
@@ -381,6 +536,7 @@ class App:
         self.offsets = {it["id"]: [it["dx"], it["dy"]]
                         for it in ps.spec_items(self.spec)
                         if it["dx"] or it["dy"]}
+        self._sync_texts()
         self.pan = [0.0, 0.0]
         self._make_preview()
         n = sum(len(c) for _l, c in palettes)
@@ -418,6 +574,19 @@ class App:
         ok, msg = self.result if self.result else (False,
                                                    self.error or "failed")
         self.status, self.status_ok = msg, ok
+
+    def _sync_texts(self):
+        """Refresh the free-text mirror and drop a selection that is gone.
+
+        The spec is the source of truth (both renderers draw from it); free
+        text boxes come back from the fresh spec so their edited words, font
+        and position carry across a rebuild.
+        """
+        self.texts = [dict(t) for t in self.spec.get("texts", [])]
+        if self.selected_text is not None and not self._find_text(
+                self.selected_text):
+            self.selected_text = None
+            self.text_edit = False
 
     def _make_preview(self):
         if self.sheet is None:
@@ -631,6 +800,9 @@ class App:
             return True
         if event.type == pygame.KEYDOWN:
             if event.key == pygame.K_ESCAPE:
+                if self.text_edit:
+                    self.text_edit = False
+                    return True
                 return False
             if self.title_focus:
                 if event.key == pygame.K_BACKSPACE:
@@ -640,6 +812,15 @@ class App:
                 elif event.unicode and event.unicode.isprintable():
                     if len(self.title_text) < 48:
                         self.title_text += event.unicode
+                return True
+            if self.text_edit and self.selected_text is not None:
+                if event.key in (pygame.K_RETURN, pygame.K_KP_ENTER,
+                                 pygame.K_TAB):
+                    self.text_edit = False
+                elif event.key == pygame.K_BACKSPACE:
+                    self._type_text("\b")
+                elif event.unicode and event.unicode.isprintable():
+                    self._type_text(event.unicode)
                 return True
             if event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
                 self.build()
@@ -655,6 +836,7 @@ class App:
                 s.handle(event)
             for c in self.checks:
                 c.handle(event)
+            self.text_size_slider.handle(event)
             if self.more:
                 for s in self.more_sliders:
                     s.handle(event)
@@ -680,6 +862,8 @@ class App:
             self._on_click(event.pos)
         for b in self.buttons:
             b.handle(event)
+        for b in self.text_buttons:
+            b.handle(event)
         if self.more:
             for b in self.more_buttons:
                 b.handle(event)
@@ -688,10 +872,29 @@ class App:
     def _on_click(self, pos):
         if self.TITLE_FIELD.collidepoint(pos):
             self.title_focus = True
+            self.text_edit = False
             return
         self.title_focus = False
         if self.PREVIEW_FRAME.collidepoint(pos):
+            # a text item under the cursor: select it and start editing; it
+            # can also be dragged in the same gesture (typing edits in place).
+            tid = self._text_at(pos)
+            if tid is not None:
+                if self.selected_text == tid:
+                    self.text_edit = True
+                else:
+                    self.selected_text = tid
+                    self.text_edit = True
+                self.drag = {"id": tid, "start": self.sheet_pos(pos),
+                             "base": ps.get_offset(self.spec, tid)}
+                kind = (self._find_text(tid) or {}).get("kind", "text")
+                self.status, self.status_ok = (
+                    "Editing the %s - type to change it, drag to move it, "
+                    "Enter to stop." % kind, True)
+                return
             item = self.pick_item(pos)
+            self.selected_text = None
+            self.text_edit = False
             if item is not None:
                 self.drag = {"id": item["id"], "start": self.sheet_pos(pos),
                              "base": ps.get_offset(self.spec, item["id"])}
@@ -736,6 +939,8 @@ class App:
         self.draw_preview()
         self.draw_status()
         for b in self.buttons:
+            b.draw(screen)
+        for b in self.text_buttons:
             b.draw(screen)
         if self.more:
             for b in self.more_buttons:
@@ -879,16 +1084,57 @@ class App:
             ox, oy = self.preview_origin()
             self.screen.blit(self.preview, (int(ox), int(oy)))
             self._draw_drag_highlight()
+            self._draw_text_selection()
             self.screen.set_clip(clip)
             self._draw_zoom_badge(fr)
         else:
             msg = font(15).render("Build to see your color script", True,
                                   INK_SOFT)
             self.screen.blit(msg, msg.get_rect(center=fr.center))
-        self.screen.blit(font(12).render(
-            "drag an image, swatch, caption or strip to move it   |   "
+        self.draw_text_bar()
+        self.screen.blit(font(11).render(
+            "click any text to edit it   |   drag items to move   |   "
             "wheel = zoom   |   drag the background = pan", True, INK_SOFT),
-            (fr.x + 2, fr.bottom + 6))
+            (fr.x + 2, fr.bottom + 24))
+
+    def draw_text_bar(self):
+        """The text-box bar under the preview: add / delete / bold + fonts."""
+        p = self.TEXT_BAR
+        self.screen.blit(rounded(p.size, 8, (255, 255, 255, 90)), p.topleft)
+        lbl = font(12, True)
+        self.screen.blit(lbl.render("Text", True, INK_SOFT),
+                         (p.x + 6, p.y + 8))
+        self.screen.blit(lbl.render("Size", True, INK_SOFT),
+                         (716, 543))
+        face = self._current_font_key()
+        self.screen.blit(font(11, True).render(face, True, INK),
+                         (748, 522))
+        self.text_size_slider.draw(self.screen)
+        sel = self._find_text(self.selected_text)
+        hint = ("editing - type now" if self.text_edit and sel
+                else ("selected: %s" % sel["kind"] if sel else "no selection"))
+        self.screen.blit(font(11, True).render(hint, True,
+                                               AQUA_DEEP if sel else INK_SOFT),
+                         (p.x + 4, p.bottom + 3))
+
+    def _draw_text_selection(self):
+        """Outline the selected text item (and show an editing caret)."""
+        if self.spec is None or self.selected_text is None:
+            return
+        for it in ps.spec_items(self.spec):
+            if it["id"] != self.selected_text:
+                continue
+            if it["kind"] not in ("title", "caption", "label", "text"):
+                return
+            r = self.item_rect_on_screen(it)
+            col = (255, 214, 102) if self.text_edit else (255, 160, 40)
+            pygame.draw.rect(self.screen, col, r.inflate(8, 6), width=2,
+                             border_radius=6)
+            if self.text_edit and int(self.t * 2) % 2 == 0:
+                cx = r.right + 2
+                pygame.draw.line(self.screen, col, (cx, r.top - 2),
+                                 (cx, r.bottom + 2), 2)
+            return
 
     def _draw_drag_highlight(self):
         active = None

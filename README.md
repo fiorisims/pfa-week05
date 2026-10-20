@@ -59,3 +59,19 @@ route to it is faster. A representative sheet was checked against the pygame
 render: swatches, images and gradient strips match pixel-for-pixel, and only
 text anti-aliasing differs (pygame and Photoshop rasterize fonts differently).
 
+### Text & fonts
+Every word on the sheet is editable and can use three font faces. Click any
+caption, title, hex label or free text box in the preview to select it (it gets
+an outline and a blinking caret), then type to change it. The **text bar** under
+the preview has:
+- **Add Text** / **Delete box** (free text boxes only),
+- **B** to toggle bold on the selected item,
+- a **Sans / Serif / Mono** face picker,
+- a **Size** slider.
+
+`Add Text` drops a new box you can drag anywhere; a new box inherits the last
+face you picked. Captions, the title and the hex labels are editable the same
+way. The chosen face carries into the PNG **and** the Photoshop document, so the
+PSD text matches what you see. Offline test: `python test_palette.py --no-live`
+(131 checks); live round trip: `python test_palette.py` (140 checks).
+

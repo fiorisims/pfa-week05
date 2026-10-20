@@ -80,18 +80,53 @@ FONT_CANDIDATES = ("Segoe UI,segoeui,Helvetica Neue,helvetica,Helvetica,"
                    "Arial,arial,DejaVu Sans,dejavusans,Liberation Sans,"
                    "liberation sans,Noto Sans,notosans,FreeSans,freesans")
 
+# selectable text faces (pygame picks the first available in each list). The
+# key is what the GUI stores in a text item's ``font``/``font_key``.
+FONT_FACES = {
+    "Sans": FONT_CANDIDATES,
+    "Serif": ("Georgia,Times New Roman,Times,DejaVu Serif,liberation serif,"
+              "Noto Serif,FreeSerif,serif"),
+    "Mono": ("Consolas,Courier New,Courier,DejaVu Sans Mono,liberation mono,"
+             "Noto Sans Mono,FreeMono,monospace"),
+}
+FONT_ORDER = ["Sans", "Serif", "Mono"]
+DEFAULT_FONT = FONT_ORDER[0]
+
+# a text item's height may be tuned between these fractions of its planned size
+TEXT_SIZE_MIN = 0.5
+TEXT_SIZE_MAX = 3.0
+
 _fonts = {}
 
 
-def font(size, bold=False):
-    key = (size, bold)
+def resolve_face(face):
+    """Map a font face key (``"Serif"``) or candidate string to a SysFont list."""
+    if not face:
+        return FONT_CANDIDATES
+    if isinstance(face, (tuple, list)):
+        return tuple(face)
+    return FONT_FACES.get(face, face)
+
+
+def font(size, bold=False, face=None):
+    key = (int(size), bool(bold), resolve_face(face))
     f = _fonts.get(key)
     if f is None:
         if not pygame.font.get_init():
             pygame.font.init()
-        f = pygame.font.SysFont(FONT_CANDIDATES, size, bold=bold)
+        f = pygame.font.SysFont(key[2], int(size), bold=bold)
         _fonts[key] = f
     return f
+
+
+def text_font(el, size=None):
+    """The font a text element (title / caption / label / free box) draws with.
+
+    Every text element may carry a ``font`` (a :data:`FONT_FACES` key or a
+    SysFont candidate string) and ``bold``; ``size`` overrides ``el["size"]``.
+    """
+    px = int(size if size is not None else el.get("size", LABEL_SIZE))
+    return font(max(6, px), bool(el.get("bold")), el.get("font"))
 
 
 # --------------------------------------------------------------------------- #
@@ -347,7 +382,7 @@ def _thumbnail_layout(surfaces, max_w, max_h):
 def plan_layout(palettes, shape="square", orientation="horizontal", cols=4,
                 swatch=96, gap=16, labels=True, gradients=True, captions=True,
                 bg=DOC_BG_DEFAULT, title="", dpi=150, doc_name=DOC_NAME,
-                images=None, image_size=None):
+                images=None, image_size=None, font=None, texts=None):
     """Plan the sheet. Returns a spec dict shared by both renderers.
 
     ``palettes`` is ``[(label, [(r, g, b), ...]), ...]``. ``images`` (optional)
@@ -356,6 +391,12 @@ def plan_layout(palettes, shape="square", orientation="horizontal", cols=4,
     each palette then gets its image(s) laid out *above* its swatches.
     ``image_size`` caps a thumbnail's height (default: the swatch size).
 
+    ``font`` picks the face for the title / captions / hex labels (a
+    :data:`FONT_FACES` key). ``texts`` is an optional list of free, editable
+    text boxes -- each ``{"id", "text", "cx", "y", "size", "color", "bold",
+    "font"}`` in sheet pixels (the GUI builds these); they are stored in
+    ``spec["texts"]`` and rendered by both renderers just like the labels.
+
     Coordinates are sheet pixels; ``strip["png"]``/``image["png"]`` are filled
     in later by ``save_strip_pngs``. Every movable element carries an ``id`` and
     ``dx``/``dy`` offsets (see ``spec_items``/``set_offset``) so the GUI can drag
@@ -363,6 +404,7 @@ def plan_layout(palettes, shape="square", orientation="horizontal", cols=4,
     """
     shape = shape if shape in SHAPES else "square"
     orientation = orientation if orientation in ORIENTATIONS else "horizontal"
+    font_key = font if font in FONT_FACES else DEFAULT_FONT
     swatch = max(16, int(swatch))
     gap = max(0, int(gap))
     bg = tuple(int(v) for v in bg)
@@ -430,14 +472,14 @@ def plan_layout(palettes, shape="square", orientation="horizontal", cols=4,
 
     spec = {"w": W, "h": H, "dpi": int(dpi), "doc_name": doc_name,
             "bg": list(bg), "shape": shape, "orientation": orientation,
-            "margin": MARGIN, "title_band": title_band,
-            "palettes": [], "title": None}
+            "margin": MARGIN, "title_band": title_band, "font": font_key,
+            "palettes": [], "title": None, "texts": []}
 
     if title:
         spec["title"] = {"id": "title", "text": str(title), "cx": W / 2.0,
                          "y": MARGIN + TITLE_SIZE, "size": TITLE_SIZE,
                          "color": list(contrast_ink(bg)), "bold": True,
-                         "dx": 0, "dy": 0}
+                         "font": font_key, "dx": 0, "dy": 0}
 
     top = MARGIN + title_band
     x_cursor = MARGIN
@@ -459,7 +501,8 @@ def plan_layout(palettes, shape="square", orientation="horizontal", cols=4,
             "id": "cap:%d" % pi,
             "text": str(b["label"]).upper(), "cx": bx + b["w"] / 2.0,
             "y": by + CAPTION_SIZE + 4, "size": CAPTION_SIZE,
-            "color": list(DEFAULT_CAPTION_COLOR), "bold": True, "dx": 0, "dy": 0,
+            "color": list(DEFAULT_CAPTION_COLOR), "bold": True,
+            "font": font_key, "dx": 0, "dy": 0,
         } if captions else None
 
         if b["thumbs"]:
@@ -489,6 +532,7 @@ def plan_layout(palettes, shape="square", orientation="horizontal", cols=4,
                 entry["label_y"] = sy + swatch + LABEL_SIZE + 4
                 entry["label_size"] = LABEL_SIZE
                 entry["label_color"] = list(contrast_ink(bg))
+                entry["label_font"] = font_key
             pal["swatches"].append(entry)
 
         if gradients:
@@ -499,7 +543,28 @@ def plan_layout(palettes, shape="square", orientation="horizontal", cols=4,
                             "name": "Gradient %d - %s" % (pi + 1, b["label"]),
                             "png": None, "dx": 0, "dy": 0}
         spec["palettes"].append(pal)
+    spec["texts"] = normalize_texts(texts, bg, font_key)
     return spec
+
+
+def normalize_texts(texts, bg=DOC_BG_DEFAULT, font=None):
+    """Clean a list of free text boxes into spec-ready dicts.
+
+    Each entry keeps whatever the caller supplied and fills in sensible defaults;
+    ``id`` is forced to ``txt:<index>`` so positions survive a rebuild.
+    """
+    out = []
+    for i, t in enumerate(texts or []):
+        t = dict(t or {})
+        el = {"id": "txt:%d" % i, "text": str(t.get("text", "")),
+              "cx": float(t.get("cx", 0.5)), "y": float(t.get("y", 0.5)),
+              "size": int(t.get("size", TITLE_SIZE)),
+              "color": list(t.get("color", contrast_ink(bg))),
+              "bold": bool(t.get("bold")),
+              "font": t.get("font", font or DEFAULT_FONT),
+              "dx": int(t.get("dx", 0)), "dy": int(t.get("dy", 0))}
+        out.append(el)
+    return out
 
 
 def save_strip_pngs(spec):
@@ -555,29 +620,42 @@ def spec_items(spec):
 
     title = spec.get("title")
     if title:
-        f = font(int(title["size"]), bool(title.get("bold")))
+        f = text_font(title)
         w, h = f.size(title["text"])
         add(title, "title", title["cx"] - w / 2.0, title["y"] - h / 2.0, w, h)
 
     for pi, pal in enumerate(spec["palettes"]):
         cap = pal.get("caption")
         if cap:
-            f = font(int(cap["size"]), bool(cap.get("bold")))
+            f = text_font(cap)
             w, h = f.size(cap["text"])
             add(cap, "caption", cap["cx"] - w / 2.0, cap["y"] - h / 2.0, w, h)
         for im in pal.get("images", []):
             add(im, "image", im["x"], im["y"], im["w"], im["h"])
         for sw in pal["swatches"]:
             add(sw, "swatch", sw["x"], sw["y"], sw["w"], sw["h"])
+            if sw.get("label_cx") is not None:
+                f = text_font(sw, sw.get("label_size", LABEL_SIZE))
+                w, h = f.size(sw["hex"])
+                add(sw, "label", sw["label_cx"] - w / 2.0,
+                    sw["label_y"] - h / 2.0, w, h)
         strip = pal.get("strip")
         if strip:
             add(strip, "strip", strip["x"], strip["y"], strip["w"], strip["h"])
+
+    for el in spec.get("texts", []):
+        f = text_font(el)
+        w, h = f.size(el.get("text") or " ")
+        add(el, "text", el["cx"] - w / 2.0, el["y"] - h / 2.0, w, h)
     return items
 
 
 def _find_item(spec, item_id):
     if item_id == "title":
         return spec.get("title")
+    for el in spec.get("texts", []):
+        if el.get("id") == item_id:
+            return el
     for pal in spec["palettes"]:
         for el in pal.get("images", []):
             if el.get("id") == item_id:
@@ -616,6 +694,8 @@ def clear_offsets(spec):
     """Snap every dragged item back to its planned position."""
     if spec.get("title"):
         spec["title"]["dx"] = spec["title"]["dy"] = 0
+    for el in spec.get("texts", []):
+        el["dx"] = el["dy"] = 0
     for pal in spec["palettes"]:
         for el in pal.get("images", []):
             el["dx"] = el["dy"] = 0
@@ -628,8 +708,130 @@ def clear_offsets(spec):
 
 
 # --------------------------------------------------------------------------- #
-# PNG renderer (drawn from the same spec the Photoshop builder uses)
+# editing text items (the GUI's click-select-type + font controls)
 # --------------------------------------------------------------------------- #
+# A "text item" is any element carrying on-sheet words: the title, a palette
+# caption, a free text box (all with a ``text`` field) or a swatch's hex label
+# (which lives on the swatch as ``hex``). These helpers give the GUI one small
+# surface to edit them through, so it never has to know which is which.
+def text_items(spec):
+    """Every editable text element as ``{"id", "kind", "el", "field", "text"}``.
+
+    ``field`` names the dict key the words live in (``"text"`` for title /
+    caption / free box, ``"hex"`` for a hex label). ``kind`` is a short label
+    the GUI can show ("title", "caption", "label", "text").
+    """
+    items = []
+    title = spec.get("title")
+    if title:
+        items.append({"id": "title", "kind": "title", "el": title,
+                      "field": "text", "text": title["text"]})
+    for pal in spec["palettes"]:
+        cap = pal.get("caption")
+        if cap:
+            items.append({"id": cap["id"], "kind": "caption", "el": cap,
+                          "field": "text", "text": cap["text"]})
+        for sw in pal["swatches"]:
+            if sw.get("label_cx") is not None:
+                items.append({"id": sw["id"], "kind": "label", "el": sw,
+                              "field": "hex", "text": sw["hex"]})
+    for el in spec.get("texts", []):
+        items.append({"id": el["id"], "kind": "text", "el": el,
+                      "field": "text", "text": el["text"]})
+    return items
+
+
+def find_text_item(spec, item_id):
+    """The :func:`text_items` entry for ``item_id`` (or ``None``)."""
+    for it in text_items(spec):
+        if it["id"] == item_id:
+            return it
+    return None
+
+
+def set_text(spec, item_id, text):
+    """Set the words of a text item in place. Returns the item or ``None``."""
+    it = find_text_item(spec, item_id)
+    if it is None:
+        return None
+    it["el"][it["field"]] = str(text)
+    return it
+
+
+# how much a "size" control moves an item's font (a fraction of the planned px)
+def text_size(spec, item_id):
+    it = find_text_item(spec, item_id)
+    if it is None:
+        return None
+    el = it["el"]
+    if it["kind"] == "label":
+        return float(el.get("label_size", LABEL_SIZE))
+    return float(el.get("size", LABEL_SIZE))
+
+
+def set_text_size(spec, item_id, size):
+    """Set a text item's font size (px), clamped to a sane band."""
+    it = find_text_item(spec, item_id)
+    if it is None:
+        return False
+    size = max(6, int(round(size)))
+    el = it["el"]
+    if it["kind"] == "label":
+        el["label_size"] = size
+    else:
+        el["size"] = size
+    return True
+
+
+def set_text_font(spec, item_id, face):
+    """Set a text item's font face (a :data:`FONT_FACES` key or candidate list)."""
+    it = find_text_item(spec, item_id)
+    if it is None:
+        return False
+    if it["kind"] == "label":
+        it["el"]["label_font"] = face
+    else:
+        it["el"]["font"] = face
+    return True
+
+
+def set_text_bold(spec, item_id, bold=None):
+    """Toggle (or set) a text item's bold flag."""
+    it = find_text_item(spec, item_id)
+    if it is None:
+        return False
+    el = it["el"]
+    el["bold"] = (not el.get("bold")) if bold is None else bool(bold)
+    return True
+
+
+def add_text(spec, text="Text", cx=None, y=None, size=None, color=None,
+             bold=False, font=None):
+    """Append a free, movable text box to ``spec["texts"]`` and return it."""
+    texts = spec.setdefault("texts", [])
+    el = {"id": "txt:%d" % len(texts), "text": str(text),
+          "cx": float(spec["w"] / 2.0 if cx is None else cx),
+          "y": float(spec["h"] * 0.3 if y is None else y),
+          "size": int(size if size is not None else TITLE_SIZE),
+          "color": list(color if color is not None else contrast_ink(spec["bg"])),
+          "bold": bool(bold),
+          "font": font or spec.get("font", DEFAULT_FONT),
+          "dx": 0, "dy": 0}
+    texts.append(el)
+    return el
+
+
+def remove_text(spec, item_id):
+    """Remove a free text box (title/captions/labels cannot be deleted)."""
+    texts = spec.get("texts", [])
+    for i, el in enumerate(texts):
+        if el.get("id") == item_id:
+            texts.pop(i)
+            return True
+    return False
+
+
+
 def _blit_png(surf, entry):
     """Blit a saved PNG (strip/thumbnail) at its offset position."""
     png = entry.get("png")
@@ -647,8 +849,8 @@ def render_spec(spec):
     title = spec.get("title")
     if title:
         dx, dy = _off(title)
-        img = font(int(title["size"]), bool(title.get("bold"))).render(
-            title["text"], True, tuple(title["color"]))
+        img = text_font(title).render(title["text"], True,
+                                      tuple(title["color"]))
         surf.blit(img, img.get_rect(center=(int(title["cx"] + dx),
                                             int(title["y"] + dy))))
 
@@ -679,20 +881,31 @@ def render_spec(spec):
         cap = pal.get("caption")
         if cap:
             dx, dy = _off(cap)
-            img = font(int(cap["size"]), bool(cap.get("bold"))).render(
-                cap["text"], True, tuple(cap["color"]))
+            img = text_font(cap).render(cap["text"], True,
+                                        tuple(cap["color"]))
             surf.blit(img, img.get_rect(center=(int(cap["cx"] + dx),
                                                 int(cap["y"] + dy))))
         for sw in pal["swatches"]:
             if sw.get("label_cx") is None:
                 continue
             dx, dy = _off(sw)
-            img = font(int(sw.get("label_size", LABEL_SIZE))).render(
+            el = {"size": sw.get("label_size", LABEL_SIZE),
+                  "font": sw.get("label_font"), "bold": False}
+            img = text_font(el).render(
                 sw["hex"], True, tuple(sw.get("label_color",
                                               DEFAULT_LABEL_COLOR)))
             surf.blit(img, img.get_rect(
                 center=(int(sw["label_cx"] + dx),
                         int(sw["label_y"] + dy))))
+
+    # free text boxes sit above everything (they are the user's own annotations)
+    for el in spec.get("texts", []):
+        if not str(el.get("text", "")).strip():
+            continue
+        dx, dy = _off(el)
+        img = text_font(el).render(str(el["text"]), True, tuple(el["color"]))
+        surf.blit(img, img.get_rect(center=(int(el["cx"] + dx),
+                                            int(el["y"] + dy))))
 
     for pal in spec["palettes"]:
         if pal.get("strip"):
@@ -718,13 +931,16 @@ def build_sheet(paths, swatches=6, shared=False, shape="square",
                 orientation="horizontal", cols=4, swatch=96, gap=16,
                 labels=True, gradients=True, captions=True,
                 bg=DOC_BG_DEFAULT, title="", dpi=150, doc_name=DOC_NAME,
-                show_images=True, image_size=None, offsets=None):
+                show_images=True, image_size=None, offsets=None, font=None,
+                texts=None):
     """Extract colors, plan the layout and render the PNG.
 
     With ``show_images`` (the default) every image is also shown as a thumbnail
     above its palette's swatches. ``offsets`` is an optional ``{id: (dx, dy)}``
     map (see ``set_offset``) applied on top of the planned positions - that is
-    how the GUI keeps hand-moved items across a rebuild.
+    how the GUI keeps hand-moved items across a rebuild. ``font`` picks the
+    title/caption/label face and ``texts`` adds free, editable text boxes (see
+    :func:`plan_layout`).
 
     Returns ``(surface, spec, palettes)`` with the strip/thumbnail PNGs saved
     and the spec ready to hand to ``send_to_photoshop``.
@@ -755,7 +971,7 @@ def build_sheet(paths, swatches=6, shared=False, shape="square",
                        gradients=gradients, captions=captions, bg=bg,
                        title=title, dpi=dpi, doc_name=doc_name,
                        images=images if show_images else None,
-                       image_size=image_size)
+                       image_size=image_size, font=font, texts=texts)
     save_strip_pngs(spec)
     if offsets:
         apply_offsets(spec, offsets)

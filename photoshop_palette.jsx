@@ -76,6 +76,21 @@ function roundedPts(x, y, w, h) {
 function ox(el) { return el.dx || 0; }
 function oy(el) { return el.dy || 0; }
 
+// The GUI stores a font face as a cross-platform key ("Sans"/"Serif"/"Mono",
+// or a raw candidate string). Map it to a real PostScript name Photoshop knows;
+// if that face is missing the assignment throws and we keep Photoshop's default.
+var FACE_NAMES = {
+    "Sans": "SegoeUI,Helvetica,Arial,DejaVuSans",
+    "Serif": "Georgia,TimesNewRoman,Times,DejaVuSerif",
+    "Mono": "Consolas,CourierNew,Courier,DejaVuSansMono"
+};
+
+function faceName(face) {
+    if (!face) { return null; }
+    if (typeof face !== "string") { return null; }   // a SysFont candidate list
+    return FACE_NAMES[face] || face;
+}
+
 function shapePts(sw) {
     var x = sw.x + ox(sw), y = sw.y + oy(sw);
     if (sw.shape === "circle") {
@@ -87,7 +102,7 @@ function shapePts(sw) {
     return rectPts(x, y, sw.w, sw.h);
 }
 
-function addText(doc, contents, x, y, sizePx, color, bold, centered, name) {
+function addText(doc, contents, x, y, sizePx, color, bold, centered, name, face) {
     var layer = doc.artLayers.add();
     layer.kind = LayerKind.TEXT;
     var ti = layer.textItem;
@@ -99,6 +114,14 @@ function addText(doc, contents, x, y, sizePx, color, bold, centered, name) {
         ti.justification = Justification.CENTER;
     }
     try { if (bold) { ti.fauxBold = true; } } catch (e) {}
+    var fn = faceName(face);
+    if (fn) {
+        // try each candidate name; a missing face throws and we keep the default
+        var names = fn.split(",");
+        for (var n = 0; n < names.length; n++) {
+            try { ti.font = names[n]; break; } catch (ef) {}
+        }
+    }
     if (name) { layer.name = name; }
     return layer;
 }
@@ -155,7 +178,7 @@ function buildSheet() {
     if (SPEC.title) {
         var t = SPEC.title;
         addText(doc, t.text, t.cx + ox(t), t.y + oy(t), t.size, t.color,
-                t.bold, true, "Title");
+                t.bold, true, "Title", t.font);
         textCount++;
     }
 
@@ -202,14 +225,26 @@ function buildSheet() {
                     pal2.caption.cx + ox(pal2.caption),
                     pal2.caption.y + oy(pal2.caption), pal2.caption.size,
                     pal2.caption.color, pal2.caption.bold, true,
-                    pal2.caption.text);
+                    pal2.caption.text, pal2.caption.font);
             textCount++;
         }
         for (var li = 0; li < pal2.swatches.length; li++) {
             var lw = pal2.swatches[li];
             if (lw.label_cx === undefined || lw.label_cx === null) { continue; }
             addText(doc, lw.hex, lw.label_cx + ox(lw), lw.label_y + oy(lw),
-                    lw.label_size, lw.label_color, false, true, lw.hex);
+                    lw.label_size, lw.label_color, false, true, lw.hex,
+                    lw.label_font);
+            textCount++;
+        }
+    }
+
+    // free text boxes the user added on top of the planned layout
+    if (SPEC.texts) {
+        for (var tx = 0; tx < SPEC.texts.length; tx++) {
+            var tb = SPEC.texts[tx];
+            if (!tb.text || !tb.text.replace(/^\s+|\s+$/g, "")) { continue; }
+            addText(doc, tb.text, tb.cx + ox(tb), tb.y + oy(tb), tb.size,
+                    tb.color, tb.bold, true, tb.text, tb.font);
             textCount++;
         }
     }
