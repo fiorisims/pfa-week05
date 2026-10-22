@@ -55,10 +55,44 @@ MAC_APP_GLOBS = (
 )
 MAC_TIMEOUT = 600
 
+# COM reports this HRESULT when Photoshop is busy - a modal dialog is open,
+# or it is still starting up. It is transient, so the bridge retries for a
+# while before giving up with a message that says what to do.
+BUSY_HRESULT = -2147417846
+BUSY_RETRIES = 3
+BUSY_WAIT = 2.0
+
 
 def to_js(path):
     """A JS string literal for a path (quotes, spaces, accents all safe)."""
     return json.dumps(str(path).replace("\\", "/"))
+
+
+def _is_busy(exc):
+    """True for the COM "application is busy" error."""
+    args = getattr(exc, "args", ())
+    return bool(args) and args[0] == BUSY_HRESULT
+
+
+def do_javascript(app, script, mode):
+    """Run one script in Photoshop, retrying while Photoshop reports busy."""
+    last = None
+    for attempt in range(BUSY_RETRIES):
+        try:
+            return app.DoJavaScript(script, [], mode)
+        except Exception as exc:                       # noqa: BLE001
+            if not _is_busy(exc):
+                raise
+            last = exc
+            print("[bridge] Photoshop is busy (a dialog may be waiting) - "
+                  "retry %d/%d..." % (attempt + 1, BUSY_RETRIES), file=sys.stderr)
+            time.sleep(BUSY_WAIT)
+    raise RuntimeError(
+        "Photoshop stayed busy for %d tries (%s).\n"
+        "A modal Photoshop dialog is probably open (a save prompt, a "
+        "missing-profile warning, the Home tab...): dismiss it, or bring "
+        "Photoshop to the front, then try again."
+        % (BUSY_RETRIES, last))
 
 
 def _mac_photoshop_app():
@@ -101,10 +135,10 @@ def connect(debug_mode):
                     "cannot talk to Photoshop via COM (%s).\n"
                     "Is Adobe Photoshop installed? Try launching it once by hand."
                     % exc) from exc
-        app.DoJavaScript("1", [], debug_mode)   # touch the engine early
-        if launched:
-            print("[bridge] connected to %s %s" % (app.Name, app.Version),
-                  file=sys.stderr)
+        do_javascript(app, "1", debug_mode)   # touch the engine early
+        print("[bridge] connected to Photoshop %s (%s)%s"
+              % (app.Version, app.Name,
+                 "  [launched]" if launched else ""), file=sys.stderr)
         return app
 
     if sys.platform == "darwin":
@@ -180,7 +214,7 @@ def run(code, debug=False, app=None):
     if isinstance(app, str):                     # macOS app-bundle path
         _mac_do_javascript(app, script, debug)
     else:                                        # Windows COM object
-        app.DoJavaScript(script, [], DEBUG_MODE if debug else EXEC_MODE)
+        do_javascript(app, script, DEBUG_MODE if debug else EXEC_MODE)
 
     if not OUT.exists():
         raise RuntimeError("Photoshop ran the script but wrote no reply "
