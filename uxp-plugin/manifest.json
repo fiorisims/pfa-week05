@@ -1,0 +1,31 @@
+{
+  "manifestVersion": 5,
+  "id": "com.fiorisims.colorscript",
+  "name": "Color Script",
+  "version": "1.0.0",
+  "main": "index.html",
+  "host": {
+    "app": "PS",
+    "minVersion": "23.3.0"
+  },
+  "entrypoints": [
+    {
+      "type": "panel",
+      "id": "colorScriptPanel",
+      "label": { "default": "Color Script" },
+      "minimumSize": { "width": 230, "height": 160 },
+      "maximumSize": { "width": 2000, "height": 2000 },
+      "preferredDockedSize": { "width": 260, "height": 260 },
+      "preferredFloatingSize": { "width": 260, "height": 260 },
+      "icons": [
+        { "width": 23, "height": 23, "path": "icons/panel.png", "scale": [1, 2], "theme": ["darkest", "dark", "medium", "lightest", "light"] }
+      ]
+    }
+  ],
+  "icons": [
+    { "width": 23, "height": 23, "path": "icons/panel.png", "scale": [1, 2], "theme": ["darkest", "dark", "medium", "lightest", "light"], "species": ["generic"] }
+  ],
+  "requiredPermissions": {
+    "localFileSystem": "request"
+  }
+}
